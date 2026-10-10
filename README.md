@@ -1,3 +1,3 @@
 # Flow
 
-Local meeting tracking & TODO app
+Personal record of meetings and the projects discussed in them.
