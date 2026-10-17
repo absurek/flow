@@ -9,6 +9,7 @@ import (
 	"html/template"
 	"net"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -50,6 +51,17 @@ type composer struct {
 	Title      string
 	HappenedAt string
 	Body       string
+	Name       string
+	Projects   []linkedProject
+	Picker     []projectView
+}
+
+type linkedProject struct {
+	ID        int64
+	Name      string
+	Tasks     []taskView
+	TaskError string
+	TasksID   string
 }
 
 type meetingView struct {
@@ -57,6 +69,7 @@ type meetingView struct {
 	Title      string
 	HappenedAt string
 	Body       string
+	Projects   []linkedProject
 }
 
 type feedPage struct {
@@ -94,6 +107,7 @@ type projectPage struct {
 	Errors    []string
 	Tasks     []taskView
 	TaskError string
+	TasksID   string
 }
 
 type meetingPage struct {
@@ -149,6 +163,7 @@ func Listen(cfg Config) (*App, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", app.feed)
 	mux.HandleFunc("POST /meetings", app.postMeeting)
+	mux.HandleFunc("POST /composer/projects", app.postComposerProjects)
 	mux.HandleFunc("GET /meetings/{id}", app.meetingPage)
 	mux.HandleFunc("GET /projects", app.projects)
 	mux.HandleFunc("POST /projects", app.postProject)
@@ -206,6 +221,16 @@ func (a *App) postMeeting(w http.ResponseWriter, r *http.Request) {
 	title := r.PostForm.Get("title")
 	happenedRaw := r.PostForm.Get("happened_at")
 	body := r.PostForm.Get("body")
+	ids, err := a.keptProjectIDs(r.Context(), formProjectIDs(r.PostForm["project"]))
+	if err != nil {
+		http.Error(w, "could not load Projects", http.StatusInternalServerError)
+		return
+	}
+	projects, err := a.linkedProjects(r.Context(), ids, composerTasksID)
+	if err != nil {
+		http.Error(w, "could not load Projects", http.StatusInternalServerError)
+		return
+	}
 
 	var errs []string
 	if strings.TrimSpace(title) == "" {
@@ -225,16 +250,127 @@ func (a *App) postMeeting(w http.ResponseWriter, r *http.Request) {
 			Title:      title,
 			HappenedAt: happenedRaw,
 			Body:       body,
+			Name:       r.PostForm.Get("name"),
+			Projects:   projects,
 		}, errs)
 		return
 	}
 
-	if err := a.insertMeeting(r.Context(), strings.TrimSpace(title), happened, body); err != nil {
+	if err := a.insertMeeting(r.Context(), strings.TrimSpace(title), happened, body, ids); err != nil {
 		http.Error(w, "could not save the Meeting", http.StatusInternalServerError)
 		return
 	}
 
 	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func (a *App) postComposerProjects(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "could not read the form", http.StatusBadRequest)
+		return
+	}
+
+	ids, err := a.keptProjectIDs(r.Context(), formProjectIDs(r.PostForm["project"]))
+	if err != nil {
+		http.Error(w, "could not load Projects", http.StatusInternalServerError)
+		return
+	}
+	if remove := formProjectIDs([]string{r.PostForm.Get("remove")}); len(remove) == 1 {
+		ids = withoutID(ids, remove[0])
+	}
+	addIDs, err := a.keptProjectIDs(r.Context(), formProjectIDs([]string{r.PostForm.Get("add")}))
+	if err != nil {
+		http.Error(w, "could not load Projects", http.StatusInternalServerError)
+		return
+	}
+	for _, id := range addIDs {
+		if !containsID(ids, id) {
+			ids = append(ids, id)
+		}
+	}
+
+	typedName := r.PostForm.Get("name")
+	var errs []string
+	status := http.StatusOK
+	if _, ok := r.PostForm["create"]; ok {
+		trimmed := strings.TrimSpace(typedName)
+		if trimmed == "" {
+			errs = append(errs, "Name is required.")
+			status = http.StatusBadRequest
+		} else {
+			taken, err := a.projectNameTaken(r.Context(), trimmed, 0)
+			if err != nil {
+				http.Error(w, "could not save the Project", http.StatusInternalServerError)
+				return
+			}
+			if taken {
+				errs = append(errs, "A Project with that name already exists.")
+				status = http.StatusBadRequest
+			} else {
+				id, err := a.insertProject(r.Context(), trimmed)
+				if err != nil {
+					http.Error(w, "could not save the Project", http.StatusInternalServerError)
+					return
+				}
+
+				ids = append(ids, id)
+				typedName = ""
+			}
+		}
+	}
+
+	projects, err := a.linkedProjects(r.Context(), ids, composerTasksID)
+	if err != nil {
+		http.Error(w, "could not load Projects", http.StatusInternalServerError)
+		return
+	}
+
+	a.renderFeed(w, r, status, composer{
+		Title:      r.PostForm.Get("title"),
+		HappenedAt: r.PostForm.Get("happened_at"),
+		Body:       r.PostForm.Get("body"),
+		Name:       typedName,
+		Projects:   projects,
+	}, errs)
+}
+
+func composerTasksID(id int64) string {
+	return fmt.Sprintf("composer-tasks-%d", id)
+}
+
+func formProjectIDs(values []string) []int64 {
+	var ids []int64
+	for _, value := range values {
+		id, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		if err != nil || id <= 0 {
+			continue
+		}
+
+		ids = append(ids, id)
+	}
+
+	return ids
+}
+
+func withoutID(ids []int64, drop int64) []int64 {
+	kept := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if id != drop {
+			kept = append(kept, id)
+		}
+	}
+
+	return kept
+}
+
+func containsID(ids []int64, id int64) bool {
+	for _, candidate := range ids {
+		if candidate == id {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (a *App) meetingPage(w http.ResponseWriter, r *http.Request) {
@@ -254,7 +390,12 @@ func (a *App) meetingPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	view := a.meetingViews([]meeting{item})[0]
+	views, err := a.meetingViews(r.Context(), []meeting{item})
+	if err != nil {
+		http.Error(w, "could not load the Meeting", http.StatusInternalServerError)
+		return
+	}
+	view := views[0]
 	a.render(w, http.StatusOK, "meeting", meetingPage{
 		Title:   view.Title,
 		Meeting: view,
@@ -587,35 +728,64 @@ func (a *App) finishTasks(w http.ResponseWriter, r *http.Request, projectID int6
 	}
 
 	if htmxRequest(r) {
-		a.renderProjectTemplate(w, r, http.StatusOK, "project-tasks", item, nil, taskErr)
+		a.renderProjectTemplate(w, r, http.StatusOK, "project-tasks", item, nil, taskErr, tasksTarget(r))
 		return
 	}
 	if taskErr != "" {
-		a.renderProjectTemplate(w, r, http.StatusBadRequest, "project", item, nil, taskErr)
+		a.renderProjectTemplate(w, r, http.StatusBadRequest, "project", item, nil, taskErr, "project-tasks")
 		return
 	}
 
 	http.Redirect(w, r, fmt.Sprintf("/projects/%d", item.ID), http.StatusSeeOther)
 }
 
-func (a *App) renderProject(w http.ResponseWriter, r *http.Request, status int, item project, errs []string, taskErr string) {
-	a.renderProjectTemplate(w, r, status, "project", item, errs, taskErr)
+func tasksTarget(r *http.Request) string {
+	target := r.Header.Get("HX-Target")
+	if target == "project-tasks" || composerTaskTarget(target) || meetingTaskTarget(target) {
+		return target
+	}
+
+	return "project-tasks"
 }
 
-func (a *App) renderProjectTemplate(w http.ResponseWriter, r *http.Request, status int, name string, item project, errs []string, taskErr string) {
+func composerTaskTarget(target string) bool {
+	rest, ok := strings.CutPrefix(target, "composer-tasks-")
+
+	return ok && decimalID(rest)
+}
+
+func meetingTaskTarget(target string) bool {
+	rest, ok := strings.CutPrefix(target, "meeting-")
+	if !ok {
+		return false
+	}
+	meetingID, projectID, ok := strings.Cut(rest, "-tasks-")
+
+	return ok && decimalID(meetingID) && decimalID(projectID)
+}
+
+func decimalID(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, ch := range value {
+		if ch < '0' || ch > '9' {
+			return false
+		}
+	}
+
+	return true
+}
+
+func (a *App) renderProject(w http.ResponseWriter, r *http.Request, status int, item project, errs []string, taskErr string) {
+	a.renderProjectTemplate(w, r, status, "project", item, errs, taskErr, "project-tasks")
+}
+
+func (a *App) renderProjectTemplate(w http.ResponseWriter, r *http.Request, status int, name string, item project, errs []string, taskErr string, tasksID string) {
 	tasks, err := a.listTasks(r.Context(), item.ID)
 	if err != nil {
 		http.Error(w, "could not load Tasks", http.StatusInternalServerError)
 		return
-	}
-
-	views := make([]taskView, 0, len(tasks))
-	for _, item := range tasks {
-		views = append(views, taskView{
-			ID:   item.ID,
-			Text: item.Text,
-			Done: item.Done,
-		})
 	}
 
 	a.render(w, status, name, projectPage{
@@ -624,8 +794,9 @@ func (a *App) renderProjectTemplate(w http.ResponseWriter, r *http.Request, stat
 		Name:      item.Name,
 		Notes:     item.Notes,
 		Errors:    errs,
-		Tasks:     views,
+		Tasks:     taskViews(tasks),
 		TaskError: taskErr,
+		TasksID:   tasksID,
 	})
 }
 
@@ -636,26 +807,117 @@ func (a *App) renderFeed(w http.ResponseWriter, r *http.Request, status int, fie
 		return
 	}
 
+	projects, err := a.listProjects(r.Context())
+	if err != nil {
+		http.Error(w, "could not load Projects", http.StatusInternalServerError)
+		return
+	}
+	fields.Picker = pickerProjects(projects, fields.Projects)
+	views, err := a.meetingViews(r.Context(), meetings)
+	if err != nil {
+		http.Error(w, "could not load Meetings", http.StatusInternalServerError)
+		return
+	}
+
 	a.render(w, status, "feed", feedPage{
 		Title:    "Meetings",
 		Errors:   errs,
 		Composer: fields,
-		Meetings: a.meetingViews(meetings),
+		Meetings: views,
 	})
 }
 
-func (a *App) meetingViews(meetings []meeting) []meetingView {
+func (a *App) linkedProjects(ctx context.Context, ids []int64, tasksID func(int64) string) ([]linkedProject, error) {
+	linked := make([]linkedProject, 0, len(ids))
+	for _, id := range ids {
+		item, err := a.projectByID(ctx, id)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		tasks, err := a.listTasks(ctx, item.ID)
+		if err != nil {
+			return nil, err
+		}
+
+		linked = append(linked, linkedProject{
+			ID:      item.ID,
+			Name:    item.Name,
+			Tasks:   taskViews(tasks),
+			TasksID: tasksID(item.ID),
+		})
+	}
+
+	return linked, nil
+}
+
+func taskViews(tasks []task) []taskView {
+	views := make([]taskView, 0, len(tasks))
+	for _, item := range tasks {
+		views = append(views, taskView{
+			ID:   item.ID,
+			Text: item.Text,
+			Done: item.Done,
+		})
+	}
+
+	return views
+}
+
+func pickerProjects(projects []project, chosen []linkedProject) []projectView {
+	skip := make(map[int64]struct{}, len(chosen))
+	for _, item := range chosen {
+		skip[item.ID] = struct{}{}
+	}
+
+	views := make([]projectView, 0, len(projects))
+	for _, item := range projects {
+		if _, ok := skip[item.ID]; ok {
+			continue
+		}
+
+		views = append(views, projectView{ID: item.ID, Name: item.Name})
+	}
+	sort.Slice(views, func(i, j int) bool {
+		left := strings.ToLower(views[i].Name)
+		right := strings.ToLower(views[j].Name)
+		if left == right {
+			return views[i].ID < views[j].ID
+		}
+
+		return left < right
+	})
+
+	return views
+}
+
+func (a *App) meetingViews(ctx context.Context, meetings []meeting) ([]meetingView, error) {
 	views := make([]meetingView, 0, len(meetings))
 	for _, item := range meetings {
+		ids, err := a.referenceProjectIDs(ctx, item.ID)
+		if err != nil {
+			return nil, err
+		}
+		projects, err := a.linkedProjects(ctx, ids, func(projectID int64) string {
+			return fmt.Sprintf("meeting-%d-tasks-%d", item.ID, projectID)
+		})
+		if err != nil {
+			return nil, err
+		}
+
 		views = append(views, meetingView{
 			ID:         item.ID,
 			Title:      item.Title,
 			HappenedAt: item.HappenedAt.In(a.loc).Format(happenedAtDisplay),
 			Body:       item.Body,
+			Projects:   projects,
 		})
 	}
 
-	return views
+	return views, nil
 }
 
 func (a *App) render(w http.ResponseWriter, status int, name string, data any) {
