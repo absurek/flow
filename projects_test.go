@@ -184,6 +184,48 @@ func TestDuplicateProjectNameIsRejected(t *testing.T) {
 	}
 }
 
+func TestProjectNamesAreUniqueUnderUnicodeCaseFold(t *testing.T) {
+	app := startApp(t)
+	omega := postProject(t, app, "Ωmega")
+	other := postProject(t, app, "Other")
+
+	res := postProjectNoRedirect(t, app, "ωmega")
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("create status = %d, want 400", res.StatusCode)
+	}
+	doc := parseResponse(t, res)
+	if !strings.Contains(textContent(doc), "A Project with that name already exists.") {
+		t.Fatalf("create text = %q, want a duplicate error", textContent(doc))
+	}
+	if got := attr(elementByName(doc, "input", "name"), "value"); got != "ωmega" {
+		t.Fatalf("name field = %q, want the submitted name", got)
+	}
+	if links := projectPageLinks(doc); len(links) != 2 || links[0] != other || links[1] != omega {
+		t.Fatalf("links = %v, want only the existing Projects", links)
+	}
+
+	res = postFormNoRedirect(t, app, other+"/name", url.Values{"name": {"ωmega"}}, nil)
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("rename status = %d, want 400", res.StatusCode)
+	}
+	doc = parseResponse(t, res)
+	if !strings.Contains(textContent(doc), "A Project with that name already exists.") {
+		t.Fatalf("rename text = %q, want a duplicate error", textContent(doc))
+	}
+	if got := attr(elementByName(doc, "input", "name"), "value"); got != "Other" {
+		t.Fatalf("name field = %q, want the previous name", got)
+	}
+
+	_, page := getPage(t, app, other)
+	if got := attr(elementByName(page, "input", "name"), "value"); got != "Other" {
+		t.Fatalf("name = %q, want the rejected rename unwritten", got)
+	}
+	_, list := getPage(t, app, "/projects")
+	if strings.Contains(textContent(list), "ωmega") {
+		t.Fatalf("list text = %q, want Ωmega kept and ωmega rejected", textContent(list))
+	}
+}
+
 func TestProjectPageShowsNameDividerAndNotes(t *testing.T) {
 	app := startApp(t)
 	postMeeting(t, app, "Planning", "2026-01-02T15:04", "Talked through the timeline.")

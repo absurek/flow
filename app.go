@@ -25,8 +25,10 @@ var htmxJS []byte
 var templateFiles embed.FS
 
 const (
-	happenedAtInput   = "2006-01-02T15:04"
-	happenedAtDisplay = "2 Jan 2006, 15:04"
+	happenedAtInput      = "2006-01-02T15:04"
+	happenedAtDisplay    = "2 Jan 2006, 15:04"
+	projectTasksID       = "project-tasks"
+	meetingTasksIDFormat = "meeting-%d-tasks-%d"
 )
 
 // Config is the startup configuration for the local app.
@@ -48,12 +50,16 @@ type App struct {
 }
 
 type composer struct {
-	Title      string
-	HappenedAt string
-	Body       string
-	Name       string
-	Projects   []linkedProject
-	Picker     []projectView
+	Title          string
+	HappenedAt     string
+	Body           string
+	Name           string
+	Projects       []linkedProject
+	Picker         []projectView
+	FormID         string
+	Action         string
+	ProjectsAction string
+	SubmitLabel    string
 }
 
 type linkedProject struct {
@@ -63,6 +69,7 @@ type linkedProject struct {
 	TaskError string
 	TasksID   string
 	Citations []citationView
+	OOB       bool
 }
 
 type meetingView struct {
@@ -116,6 +123,22 @@ type projectPage struct {
 	TaskError string
 	TasksID   string
 	Citations []citationView
+	OOB       bool
+}
+
+type taskListView struct {
+	ID        int64
+	Tasks     []taskView
+	TaskError string
+	TasksID   string
+	Citations []citationView
+	OOB       bool
+}
+
+// taskTarget is the list an HTMX Task write replaces, plus whether that list shows the citation rule.
+type taskTarget struct {
+	ID               string
+	IncludeCitations bool
 }
 
 type meetingPage struct {
@@ -252,19 +275,7 @@ func (a *App) postMeeting(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var errs []string
-	if strings.TrimSpace(title) == "" {
-		errs = append(errs, "Title is required.")
-	}
-
-	happenedAt := strings.TrimSpace(happenedRaw)
-	happened, err := time.ParseInLocation(happenedAtInput, happenedAt, a.loc)
-	if happenedAt == "" {
-		errs = append(errs, "Happened-at is required.")
-	} else if err != nil {
-		errs = append(errs, "Happened-at is invalid.")
-	}
-
+	happened, errs := meetingFieldErrors(title, happenedRaw, a.loc)
 	if len(errs) > 0 {
 		a.renderFeed(w, r, http.StatusBadRequest, composer{
 			Title:      title,
@@ -276,7 +287,7 @@ func (a *App) postMeeting(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := a.insertMeeting(r.Context(), strings.TrimSpace(title), happened, body, ids); err != nil {
+	if err := a.insertMeeting(r.Context(), title, happened, body, ids); err != nil {
 		http.Error(w, "could not save the Meeting", http.StatusInternalServerError)
 		return
 	}
@@ -325,7 +336,9 @@ func (a *App) postMeetingProjects(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not load Projects", http.StatusInternalServerError)
 		return
 	}
-	projects, err := a.editProjects(r.Context(), item.ID, selection.IDs)
+	projects, err := a.linkedProjects(r.Context(), selection.IDs, func(projectID int64) string {
+		return meetingTasksID(item.ID, projectID)
+	})
 	if err != nil {
 		http.Error(w, "could not load Projects", http.StatusInternalServerError)
 		return
@@ -405,6 +418,27 @@ func composerTasksID(id int64) string {
 	return fmt.Sprintf("composer-tasks-%d", id)
 }
 
+func meetingTasksID(meetingID, projectID int64) string {
+	return fmt.Sprintf(meetingTasksIDFormat, meetingID, projectID)
+}
+
+func meetingFieldErrors(title, happenedRaw string, loc *time.Location) (time.Time, []string) {
+	var errs []string
+	if strings.TrimSpace(title) == "" {
+		errs = append(errs, "Title is required.")
+	}
+
+	happenedAt := strings.TrimSpace(happenedRaw)
+	happened, err := time.ParseInLocation(happenedAtInput, happenedAt, loc)
+	if happenedAt == "" {
+		errs = append(errs, "Happened-at is required.")
+	} else if err != nil {
+		errs = append(errs, "Happened-at is invalid.")
+	}
+
+	return happened, errs
+}
+
 func formProjectIDs(values []string) []int64 {
 	var ids []int64
 	for _, value := range values {
@@ -451,6 +485,7 @@ func (a *App) meetingPage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not load the Meeting", http.StatusInternalServerError)
 		return
 	}
+
 	view := views[0]
 	a.render(w, http.StatusOK, "meeting", meetingPage{
 		Title:   view.Title,
@@ -469,7 +504,9 @@ func (a *App) meetingEdit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not load the Meeting", http.StatusInternalServerError)
 		return
 	}
-	projects, err := a.editProjects(r.Context(), item.ID, ids)
+	projects, err := a.linkedProjects(r.Context(), ids, func(projectID int64) string {
+		return meetingTasksID(item.ID, projectID)
+	})
 	if err != nil {
 		http.Error(w, "could not load the Meeting", http.StatusInternalServerError)
 		return
@@ -502,21 +539,11 @@ func (a *App) saveMeeting(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var errs []string
-	if strings.TrimSpace(title) == "" {
-		errs = append(errs, "Title is required.")
-	}
-
-	happenedAt := strings.TrimSpace(happenedRaw)
-	happened, err := time.ParseInLocation(happenedAtInput, happenedAt, a.loc)
-	if happenedAt == "" {
-		errs = append(errs, "Happened-at is required.")
-	} else if err != nil {
-		errs = append(errs, "Happened-at is invalid.")
-	}
-
+	happened, errs := meetingFieldErrors(title, happenedRaw, a.loc)
 	if len(errs) > 0 {
-		projects, err := a.editProjects(r.Context(), item.ID, ids)
+		projects, err := a.linkedProjects(r.Context(), ids, func(projectID int64) string {
+			return meetingTasksID(item.ID, projectID)
+		})
 		if err != nil {
 			http.Error(w, "could not load Projects", http.StatusInternalServerError)
 			return
@@ -532,7 +559,7 @@ func (a *App) saveMeeting(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := a.updateMeeting(r.Context(), item.ID, strings.TrimSpace(title), happened, body, ids); err != nil {
+	if err := a.updateMeeting(r.Context(), item.ID, title, happened, body, ids); err != nil {
 		http.Error(w, "could not save the Meeting", http.StatusInternalServerError)
 		return
 	}
@@ -573,18 +600,16 @@ func (a *App) renderMeetingEdit(w http.ResponseWriter, r *http.Request, status i
 		return
 	}
 	fields.Picker = pickerProjects(projects, fields.Projects)
+	fields.FormID = "meeting-edit"
+	fields.Action = fmt.Sprintf("/meetings/%d", id)
+	fields.ProjectsAction = fmt.Sprintf("/meetings/%d/projects", id)
+	fields.SubmitLabel = "Save"
 
 	a.render(w, status, "meeting-edit", meetingEditPage{
 		Title:    "Edit Meeting",
 		ID:       id,
 		Errors:   errs,
 		Composer: fields,
-	})
-}
-
-func (a *App) editProjects(ctx context.Context, meetingID int64, ids []int64) ([]linkedProject, error) {
-	return a.linkedProjects(ctx, ids, func(projectID int64) string {
-		return fmt.Sprintf("meeting-%d-tasks-%d", meetingID, projectID)
 	})
 }
 
@@ -846,6 +871,7 @@ func (a *App) postTask(w http.ResponseWriter, r *http.Request) {
 			a.finishTasks(w, r, item.ProjectID, "Task text is required.")
 			return
 		}
+
 		if err := a.updateTaskText(r.Context(), item.ID, text); err != nil {
 			http.Error(w, "could not save the Task", http.StatusInternalServerError)
 			return
@@ -914,6 +940,7 @@ func (a *App) postProjectTask(w http.ResponseWriter, r *http.Request) {
 		a.finishTasks(w, r, item.ID, "Task text is required.")
 		return
 	}
+
 	if err := a.insertTask(r.Context(), item.ID, text); err != nil {
 		http.Error(w, "could not save the Task", http.StatusInternalServerError)
 		return
@@ -934,24 +961,27 @@ func (a *App) finishTasks(w http.ResponseWriter, r *http.Request, projectID int6
 	}
 
 	if htmxRequest(r) {
-		a.renderProjectTemplate(w, r, http.StatusOK, "project-tasks", item, nil, taskErr, tasksTarget(r))
+		a.renderTaskLists(w, r, item, taskErr, tasksTarget(r))
 		return
 	}
 	if taskErr != "" {
-		a.renderProjectTemplate(w, r, http.StatusBadRequest, "project", item, nil, taskErr, "project-tasks")
+		a.renderProjectTemplate(w, r, http.StatusBadRequest, "project", item, nil, taskErr, projectTasksID, true)
 		return
 	}
 
 	http.Redirect(w, r, fmt.Sprintf("/projects/%d", item.ID), http.StatusSeeOther)
 }
 
-func tasksTarget(r *http.Request) string {
+func tasksTarget(r *http.Request) taskTarget {
 	target := r.Header.Get("HX-Target")
-	if target == "project-tasks" || composerTaskTarget(target) || meetingTaskTarget(target) {
-		return target
+	if target == projectTasksID {
+		return taskTarget{ID: projectTasksID, IncludeCitations: true}
+	}
+	if composerTaskTarget(target) || meetingTaskTarget(target) {
+		return taskTarget{ID: target}
 	}
 
-	return "project-tasks"
+	return taskTarget{ID: projectTasksID, IncludeCitations: true}
 }
 
 func composerTaskTarget(target string) bool {
@@ -965,9 +995,22 @@ func meetingTaskTarget(target string) bool {
 	if !ok {
 		return false
 	}
-	meetingID, projectID, ok := strings.Cut(rest, "-tasks-")
 
-	return ok && decimalID(meetingID) && decimalID(projectID)
+	meetingPart, projectPart, ok := strings.Cut(rest, "-tasks-")
+	if !ok || !decimalID(meetingPart) || !decimalID(projectPart) {
+		return false
+	}
+
+	meetingID, err := strconv.ParseInt(meetingPart, 10, 64)
+	if err != nil {
+		return false
+	}
+	projectID, err := strconv.ParseInt(projectPart, 10, 64)
+	if err != nil {
+		return false
+	}
+
+	return target == meetingTasksID(meetingID, projectID)
 }
 
 func decimalID(value string) bool {
@@ -984,10 +1027,10 @@ func decimalID(value string) bool {
 }
 
 func (a *App) renderProject(w http.ResponseWriter, r *http.Request, status int, item project, errs []string, taskErr string) {
-	a.renderProjectTemplate(w, r, status, "project", item, errs, taskErr, "project-tasks")
+	a.renderProjectTemplate(w, r, status, "project", item, errs, taskErr, projectTasksID, true)
 }
 
-func (a *App) renderProjectTemplate(w http.ResponseWriter, r *http.Request, status int, name string, item project, errs []string, taskErr string, tasksID string) {
+func (a *App) renderProjectTemplate(w http.ResponseWriter, r *http.Request, status int, name string, item project, errs []string, taskErr string, tasksID string, includeCitations bool) {
 	tasks, err := a.listTasks(r.Context(), item.ID)
 	if err != nil {
 		http.Error(w, "could not load Tasks", http.StatusInternalServerError)
@@ -996,12 +1039,13 @@ func (a *App) renderProjectTemplate(w http.ResponseWriter, r *http.Request, stat
 
 	// The citation rule belongs to the Project page. Embedded task lists reuse this template.
 	var citations []citationView
-	if tasksID == "project-tasks" {
+	if includeCitations {
 		items, err := a.listCitations(r.Context(), item.ID)
 		if err != nil {
 			http.Error(w, "could not load Meetings", http.StatusInternalServerError)
 			return
 		}
+
 		citations = a.citationViews(items)
 	}
 
@@ -1016,6 +1060,59 @@ func (a *App) renderProjectTemplate(w http.ResponseWriter, r *http.Request, stat
 		TasksID:   tasksID,
 		Citations: citations,
 	})
+}
+
+func (a *App) renderTaskLists(w http.ResponseWriter, r *http.Request, item project, taskErr string, primary taskTarget) {
+	tasks, err := a.listTasks(r.Context(), item.ID)
+	if err != nil {
+		http.Error(w, "could not load Tasks", http.StatusInternalServerError)
+		return
+	}
+	views := taskViews(tasks)
+
+	cited, err := a.listCitations(r.Context(), item.ID)
+	if err != nil {
+		http.Error(w, "could not load Meetings", http.StatusInternalServerError)
+		return
+	}
+
+	citations := a.citationViews(cited)
+	var primaryCitations []citationView
+	if primary.IncludeCitations {
+		primaryCitations = citations
+	}
+
+	lists := []taskListView{
+		taskList(item, views, primary.ID, taskErr, primaryCitations, false),
+	}
+	for _, meeting := range cited {
+		id := meetingTasksID(meeting.ID, item.ID)
+		if id == primary.ID {
+			continue
+		}
+
+		lists = append(lists, taskList(item, views, id, "", nil, true))
+	}
+	if !primary.IncludeCitations {
+		lists = append(lists, taskList(item, views, projectTasksID, "", citations, true))
+	}
+	composerID := composerTasksID(item.ID)
+	if primary.ID != composerID {
+		lists = append(lists, taskList(item, views, composerID, "", nil, true))
+	}
+
+	a.render(w, http.StatusOK, "task-lists", lists)
+}
+
+func taskList(item project, tasks []taskView, tasksID, taskErr string, citations []citationView, oob bool) taskListView {
+	return taskListView{
+		ID:        item.ID,
+		Tasks:     tasks,
+		TaskError: taskErr,
+		TasksID:   tasksID,
+		Citations: citations,
+		OOB:       oob,
+	}
 }
 
 func (a *App) citationViews(items []citation) []citationView {
@@ -1043,7 +1140,12 @@ func (a *App) renderFeed(w http.ResponseWriter, r *http.Request, status int, fie
 		http.Error(w, "could not load Projects", http.StatusInternalServerError)
 		return
 	}
+
 	fields.Picker = pickerProjects(projects, fields.Projects)
+	fields.FormID = "composer"
+	fields.Action = "/meetings"
+	fields.ProjectsAction = "/composer/projects"
+	fields.SubmitLabel = "Post Meeting"
 	views, err := a.meetingViews(r.Context(), meetings)
 	if err != nil {
 		http.Error(w, "could not load Meetings", http.StatusInternalServerError)
@@ -1132,8 +1234,9 @@ func (a *App) meetingViews(ctx context.Context, meetings []meeting) ([]meetingVi
 		if err != nil {
 			return nil, err
 		}
+
 		projects, err := a.linkedProjects(ctx, ids, func(projectID int64) string {
-			return fmt.Sprintf("meeting-%d-tasks-%d", item.ID, projectID)
+			return meetingTasksID(item.ID, projectID)
 		})
 		if err != nil {
 			return nil, err
@@ -1164,9 +1267,6 @@ func requireLoopback(addr string) (string, error) {
 	}
 	if port == "" {
 		return "", fmt.Errorf("invalid listen address %q: missing port", addr)
-	}
-	if host == "localhost" {
-		return addr, nil
 	}
 
 	ip := net.ParseIP(host)

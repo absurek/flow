@@ -617,7 +617,7 @@ func TestTaskChangesOnTheMeetingAreTheProjectTasks(t *testing.T) {
 	if strings.Contains(textContent(fragment), "Leave me") {
 		t.Fatal("toggling Ledger changed Other's Tasks")
 	}
-	assertTasks(t, fragment, []taskState{
+	assertTasks(t, elementByID(fragment, target), []taskState{
 		{text: "Newer", done: true},
 		{text: "Older", done: false},
 		{text: "Latest revised", done: false},
