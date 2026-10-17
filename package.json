@@ -1,0 +1,11 @@
+{
+  "name": "flow",
+  "private": true,
+  "scripts": {
+    "css": "tailwindcss -i ./static/input.css -o ./static/app.css --minify"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.1.14",
+    "tailwindcss": "^4.1.14"
+  }
+}
