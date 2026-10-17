@@ -115,9 +115,10 @@
 <textarea class="mt-1 w-full rounded border border-zinc-700 bg-zinc-950 px-3 py-2" id="notes" name="notes">{{.Notes}}</textarea>
 </form>{{end}}
 
-{{define "project-tasks"}}{{$tasksID := .TasksID}}<div id="{{$tasksID}}" class="mt-8 space-y-3">
+{{define "project-tasks"}}{{$tasksID := .TasksID}}{{$root := .}}<div id="{{$tasksID}}" class="mt-8 space-y-3">
 {{if .TaskError}}<p class="text-red-300">{{.TaskError}}</p>{{end}}
-{{range .Tasks}}<div class="flex items-center gap-3" data-task="{{.ID}}">
+{{$shown := false}}
+{{range .Tasks}}{{if and (not $shown) (not .Done)}}{{template "citation-rule" $root}}{{$shown = true}}{{end}}<div class="flex items-center gap-3" data-task="{{.ID}}">
 <form method="post" action="/tasks/{{.ID}}" hx-post="/tasks/{{.ID}}" hx-trigger="change" hx-target="#{{$tasksID}}" hx-swap="outerHTML">
 <input class="h-4 w-4 accent-zinc-100" type="checkbox" name="done" value="1"{{if .Done}} checked{{end}} aria-label="Done">
 <input type="hidden" name="done" value="0">
@@ -130,11 +131,14 @@
 </form>
 </div>
 {{end}}
+{{if not $shown}}{{template "citation-rule" $root}}{{end}}
 <form class="flex items-center gap-3" method="post" action="/projects/{{.ID}}/tasks" hx-post="/projects/{{.ID}}/tasks" hx-target="#{{$tasksID}}" hx-swap="outerHTML">
 <input class="min-w-0 flex-1 rounded border border-zinc-700 bg-zinc-950 px-3 py-2" type="text" name="text" aria-label="New Task">
 <button class="rounded bg-zinc-100 px-4 py-2 text-sm font-medium text-zinc-900" type="submit">Add Task</button>
 </form>
 </div>{{end}}
+
+{{define "citation-rule"}}{{if .Citations}}{{range .Citations}}<p class="text-sm text-zinc-400" data-citation="{{.ID}}">{{.HappenedAt}} <a class="font-medium text-zinc-100" href="/meetings/{{.ID}}">{{.Title}}</a></p>{{end}}{{end}}{{end}}
 
 {{define "project"}}{{template "head" .}}
 {{template "project-name" .}}

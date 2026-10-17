@@ -62,6 +62,7 @@ type linkedProject struct {
 	Tasks     []taskView
 	TaskError string
 	TasksID   string
+	Citations []citationView
 }
 
 type meetingView struct {
@@ -99,6 +100,12 @@ type taskView struct {
 	Done bool
 }
 
+type citationView struct {
+	ID         int64
+	Title      string
+	HappenedAt string
+}
+
 type projectPage struct {
 	Title     string
 	ID        int64
@@ -108,6 +115,7 @@ type projectPage struct {
 	Tasks     []taskView
 	TaskError string
 	TasksID   string
+	Citations []citationView
 }
 
 type meetingPage struct {
@@ -788,6 +796,17 @@ func (a *App) renderProjectTemplate(w http.ResponseWriter, r *http.Request, stat
 		return
 	}
 
+	// The citation rule belongs to the Project page. Embedded task lists reuse this template.
+	var citations []citationView
+	if tasksID == "project-tasks" {
+		items, err := a.listCitations(r.Context(), item.ID)
+		if err != nil {
+			http.Error(w, "could not load Meetings", http.StatusInternalServerError)
+			return
+		}
+		citations = a.citationViews(items)
+	}
+
 	a.render(w, status, name, projectPage{
 		Title:     item.Name,
 		ID:        item.ID,
@@ -797,7 +816,21 @@ func (a *App) renderProjectTemplate(w http.ResponseWriter, r *http.Request, stat
 		Tasks:     taskViews(tasks),
 		TaskError: taskErr,
 		TasksID:   tasksID,
+		Citations: citations,
 	})
+}
+
+func (a *App) citationViews(items []citation) []citationView {
+	views := make([]citationView, 0, len(items))
+	for _, item := range items {
+		views = append(views, citationView{
+			ID:         item.ID,
+			Title:      item.Title,
+			HappenedAt: item.HappenedAt.In(a.loc).Format(happenedAtDisplay),
+		})
+	}
+
+	return views
 }
 
 func (a *App) renderFeed(w http.ResponseWriter, r *http.Request, status int, fields composer, errs []string) {
