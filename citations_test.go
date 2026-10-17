@@ -282,7 +282,7 @@ func TestFinishingATaskMovesItAboveTheCitationRule(t *testing.T) {
 		t.Fatalf("toggle status=%d body=%q, want the Project task list", toggled.Status, toggled.Body)
 	}
 	fragment := parseHTML(t, toggled.Body)
-	if got := taskCitationOrder(fragment); !sameStrings(got, []string{
+	if got := taskCitationOrder(elementByID(fragment, "project-tasks")); !sameStrings(got, []string{
 		"task:Already done",
 		"task:Still open",
 		"citation:Planning",
@@ -335,10 +335,11 @@ func TestFinishingATaskMovesItAboveTheCitationRule(t *testing.T) {
 		t.Fatalf("embedded toggle status = %d, want 200", embedded.Status)
 	}
 	embeddedDoc := parseHTML(t, embedded.Body)
-	if hasAttribute(embeddedDoc, "data-citation") {
+	embeddedList := elementByID(embeddedDoc, target)
+	if hasAttribute(embeddedList, "data-citation") {
 		t.Fatal("finishing a Task on the Meeting renders the citation rule")
 	}
-	assertTasks(t, embeddedDoc, []taskState{
+	assertTasks(t, embeddedList, []taskState{
 		{text: "Already done", done: true},
 		{text: "Still open", done: true},
 		{text: "Fresh", done: true},

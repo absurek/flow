@@ -198,7 +198,7 @@ func TestLeavingTheTaskFieldSavesItsText(t *testing.T) {
 		if !strings.Contains(textContent(doc), "Task text is required.") {
 			t.Fatalf("text %q page = %q, want an error", blank, textContent(doc))
 		}
-		assertTasks(t, doc, []taskState{
+		assertTasks(t, elementByID(doc, "project-tasks"), []taskState{
 			{text: "Older revised", done: false},
 			{text: "Newer", done: false},
 		})
@@ -234,7 +234,7 @@ func TestLeavingTheTaskFieldSavesItsText(t *testing.T) {
 	if !strings.Contains(textContent(doc), "Task text is required.") {
 		t.Fatalf("blank add text = %q, want an error", textContent(doc))
 	}
-	assertTasks(t, doc, []taskState{
+	assertTasks(t, elementByID(doc, "project-tasks"), []taskState{
 		{text: "alpha beta", done: false},
 		{text: "Newer", done: false},
 	})
@@ -416,7 +416,7 @@ func TestTaskChangesUpdateInPlace(t *testing.T) {
 	if elementByID(doc, "project-tasks") == nil {
 		t.Fatal("HTMX add did not return the task region")
 	}
-	assertTasks(t, doc, []taskState{{text: "Write the notes", done: false}})
+	assertTasks(t, elementByID(doc, "project-tasks"), []taskState{{text: "Write the notes", done: false}})
 	if attr(addTaskForm(doc), "hx-post") != loc+"/tasks" || attr(addTaskForm(doc), "hx-target") != "#project-tasks" {
 		t.Fatal("replaced task region lost its add form")
 	}
@@ -438,7 +438,7 @@ func TestTaskChangesUpdateInPlace(t *testing.T) {
 
 	added = readPost(t, app, loc+"/tasks", url.Values{"text": {"Ship it"}}, hx)
 	doc = parseHTML(t, added.Body)
-	assertTasks(t, doc, []taskState{
+	assertTasks(t, elementByID(doc, "project-tasks"), []taskState{
 		{text: "Write the notes", done: false},
 		{text: "Ship it", done: false},
 	})
@@ -448,7 +448,7 @@ func TestTaskChangesUpdateInPlace(t *testing.T) {
 		t.Fatalf("HTMX edit status=%d body=%q, want the task region only", edited.Status, edited.Body)
 	}
 	doc = parseHTML(t, edited.Body)
-	assertTasks(t, doc, []taskState{
+	assertTasks(t, elementByID(doc, "project-tasks"), []taskState{
 		{text: "Notes revised", done: false},
 		{text: "Ship it", done: false},
 	})
@@ -461,7 +461,7 @@ func TestTaskChangesUpdateInPlace(t *testing.T) {
 	if !strings.Contains(textContent(doc), "Task text is required.") {
 		t.Fatalf("HTMX blank edit text = %q, want an error", textContent(doc))
 	}
-	assertTasks(t, doc, []taskState{
+	assertTasks(t, elementByID(doc, "project-tasks"), []taskState{
 		{text: "Notes revised", done: false},
 		{text: "Ship it", done: false},
 	})
@@ -472,14 +472,14 @@ func TestTaskChangesUpdateInPlace(t *testing.T) {
 		t.Fatalf("HTMX done status=%d body=%q, want the task region only", done.Status, done.Body)
 	}
 	doc = parseHTML(t, done.Body)
-	assertTasks(t, doc, []taskState{
+	assertTasks(t, elementByID(doc, "project-tasks"), []taskState{
 		{text: "Ship it", done: true},
 		{text: "Notes revised", done: false},
 	})
 
 	reopened := readPost(t, app, "/tasks/"+shipID, url.Values{"done": {"0"}}, hx)
 	doc = parseHTML(t, reopened.Body)
-	assertTasks(t, doc, []taskState{
+	assertTasks(t, elementByID(doc, "project-tasks"), []taskState{
 		{text: "Notes revised", done: false},
 		{text: "Ship it", done: false},
 	})
@@ -489,7 +489,7 @@ func TestTaskChangesUpdateInPlace(t *testing.T) {
 		t.Fatalf("HTMX delete status=%d body=%q, want the task region only", deleted.Status, deleted.Body)
 	}
 	doc = parseHTML(t, deleted.Body)
-	assertTasks(t, doc, []taskState{{text: "Notes revised", done: false}})
+	assertTasks(t, elementByID(doc, "project-tasks"), []taskState{{text: "Notes revised", done: false}})
 	if attr(taskForm(taskRowByText(doc, "Notes revised"), "delete"), "hx-post") != "/tasks/"+id+"/delete" {
 		t.Fatal("replaced task region lost its delete form")
 	}
@@ -499,6 +499,86 @@ func TestTaskChangesUpdateInPlace(t *testing.T) {
 	if strings.Contains(textContent(page), "Task text is required.") {
 		t.Fatal("the rejected text is still showing")
 	}
+}
+
+func TestCheckingATaskUpdatesEveryListOfThatProject(t *testing.T) {
+	app := startApp(t)
+	ledger := postProject(t, app, "Ledger")
+	postTask(t, app, ledger, "Ship it")
+	postTask(t, app, ledger, "Leave open")
+	postMeetingProjects(t, app, "Earlier", "2026-01-02T15:04", "first notes", ledger)
+	postMeetingProjects(t, app, "Later", "2026-02-02T15:04", "second notes", ledger)
+
+	_, feed := getPage(t, app, "/")
+	earlier := meetingCard(feed, "Earlier")
+	later := meetingCard(feed, "Later")
+	earlierForm := taskForm(taskRowByText(earlier, "Ship it"), "checkbox")
+	laterForm := taskForm(taskRowByText(later, "Ship it"), "checkbox")
+	earlierTarget := strings.TrimPrefix(attr(earlierForm, "hx-target"), "#")
+	laterTarget := strings.TrimPrefix(attr(laterForm, "hx-target"), "#")
+	if earlierTarget == "" || laterTarget == "" || earlierTarget == laterTarget {
+		t.Fatalf("targets = %q and %q, want two Meeting lists", earlierTarget, laterTarget)
+	}
+
+	toggled := readPost(t, app, attr(earlierForm, "action"), url.Values{"done": {"1"}}, http.Header{
+		"HX-Request": {"true"},
+		"HX-Target":  {earlierTarget},
+	})
+	if toggled.Status != http.StatusOK || strings.Contains(toggled.Body, "<html") {
+		t.Fatalf("toggle status=%d body=%q, want the task lists", toggled.Status, toggled.Body)
+	}
+	doc := parseHTML(t, toggled.Body)
+	earlierList := elementByID(doc, earlierTarget)
+	laterList := elementByID(doc, laterTarget)
+	if earlierList == nil || laterList == nil {
+		t.Fatal("the response must include both Meeting lists")
+	}
+	if attr(earlierList, "hx-swap-oob") != "" {
+		t.Fatal("the targeted list is the primary fragment")
+	}
+	if attr(laterList, "hx-swap-oob") != "outerHTML" {
+		t.Fatalf("other list swap = %q, want an out-of-band outerHTML swap", attr(laterList, "hx-swap-oob"))
+	}
+	doneSplit := []taskState{
+		{text: "Ship it", done: true},
+		{text: "Leave open", done: false},
+	}
+	assertTasks(t, earlierList, doneSplit)
+	assertTasks(t, laterList, doneSplit)
+	if hasAttribute(earlierList, "data-citation") || hasAttribute(laterList, "data-citation") {
+		t.Fatal("Meeting lists omit the citation rule")
+	}
+
+	projectList := elementByID(doc, "project-tasks")
+	if projectList == nil || attr(projectList, "hx-swap-oob") != "outerHTML" {
+		t.Fatal("the Project list must swap out of band")
+	}
+	assertTasks(t, projectList, doneSplit)
+	if !hasAttribute(projectList, "data-citation") {
+		t.Fatal("the Project list includes the citation rule")
+	}
+
+	composerList := elementByID(doc, "composer-tasks-"+projectIDString(ledger))
+	if composerList == nil || attr(composerList, "hx-swap-oob") != "outerHTML" {
+		t.Fatal("the composer list must swap out of band")
+	}
+	assertTasks(t, composerList, doneSplit)
+	if hasAttribute(composerList, "data-citation") {
+		t.Fatal("the composer list omits the citation rule")
+	}
+
+	res := postFormNoRedirect(t, app, attr(earlierForm, "action"), url.Values{"done": {"0"}}, nil)
+	if res.StatusCode != http.StatusSeeOther {
+		t.Fatalf("status = %d, want a normal request to redirect", res.StatusCode)
+	}
+	status, page := getPage(t, app, res.Header.Get("Location"))
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want the resulting page", status)
+	}
+	assertTasks(t, page, []taskState{
+		{text: "Ship it", done: false},
+		{text: "Leave open", done: false},
+	})
 }
 
 func assertProjectCounts(t *testing.T, doc *html.Node, name, done, open string) {

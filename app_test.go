@@ -45,10 +45,13 @@ func TestPortFlagListensOnLoopback(t *testing.T) {
 	}
 }
 
-func TestAddrFlagRefusesNonLoopback(t *testing.T) {
-	_, err := flow.ParseConfig([]string{"-addr", "0.0.0.0:8080"}, func(string) string { return "" })
+func TestLocalhostHostnameIsNotLoopback(t *testing.T) {
+	_, err := flow.Listen(flow.Config{
+		Addr:   "localhost:0",
+		DBPath: filepath.Join(t.TempDir(), "flow.db"),
+	})
 	if err == nil {
-		t.Fatal("expected -addr 0.0.0.0 to be refused")
+		t.Fatal("expected localhost to be refused")
 	}
 	if !strings.Contains(err.Error(), "loopback") {
 		t.Fatalf("error = %q, want it to include loopback", err)
@@ -287,6 +290,54 @@ func TestWhitespaceTitleIsRejected(t *testing.T) {
 	_, feed := getPage(t, app, "/")
 	if strings.Contains(textContent(feed), "ghost body") {
 		t.Fatal("whitespace title created a Meeting")
+	}
+}
+
+func TestMeetingTitleKeepsSurroundingSpaces(t *testing.T) {
+	app := startApp(t)
+
+	postMeeting(t, app, "  Hello  ", "2026-01-02T15:04", "  notes  ")
+	_, feed := getPage(t, app, "/")
+	card := meetingCard(feed, "Hello")
+	if card == nil || textContent(findElement(card, "h2")) != "  Hello  " {
+		got := ""
+		if card != nil {
+			got = textContent(findElement(card, "h2"))
+		}
+		t.Fatalf("feed title = %q, want the typed spaces", got)
+	}
+	if !strings.Contains(textContent(card), "  notes  ") {
+		t.Fatalf("feed body = %q, want the body left unchanged", textContent(card))
+	}
+
+	meetingURL := linkHref(card, "Hello")
+	_, page := getPage(t, app, meetingURL)
+	if got := textContent(findElement(page, "h2")); got != "  Hello  " {
+		t.Fatalf("Meeting title = %q, want the typed spaces", got)
+	}
+	if !strings.Contains(textContent(page), "  notes  ") {
+		t.Fatalf("Meeting body = %q, want the body left unchanged", textContent(page))
+	}
+
+	_, edit := getPage(t, app, meetingURL+"/edit")
+	if got := attr(elementByName(edit, "input", "title"), "value"); got != "  Hello  " {
+		t.Fatalf("edit title = %q, want the typed spaces", got)
+	}
+
+	res := postFormNoRedirect(t, app, meetingURL, url.Values{
+		"title":       {"  Revised  "},
+		"happened_at": {"2026-01-02T15:04"},
+		"body":        {"  notes  "},
+	}, nil)
+	if res.StatusCode != http.StatusSeeOther {
+		t.Fatalf("save status = %d, want 303", res.StatusCode)
+	}
+	_, page = getPage(t, app, res.Header.Get("Location"))
+	if got := textContent(findElement(page, "h2")); got != "  Revised  " {
+		t.Fatalf("saved title = %q, want the typed spaces", got)
+	}
+	if !strings.Contains(textContent(page), "  notes  ") {
+		t.Fatalf("saved body = %q, want the body left unchanged", textContent(page))
 	}
 }
 

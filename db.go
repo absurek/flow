@@ -61,6 +61,7 @@ func openDB(path string) (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
 	}
+
 	db.SetMaxOpenConns(1)
 
 	if err := db.Ping(); err != nil {
@@ -239,18 +240,33 @@ func (a *App) keptProjectIDs(ctx context.Context, ids []int64) ([]int64, error) 
 }
 
 func (a *App) projectNameTaken(ctx context.Context, name string, exceptID int64) (bool, error) {
-	var id int64
-	err := a.db.QueryRowContext(ctx, `
-		SELECT id FROM projects
-		WHERE name = ? AND id <> ?`, name, exceptID).Scan(&id)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
+	rows, err := a.db.QueryContext(ctx, `SELECT id, name FROM projects`)
 	if err != nil {
 		return false, err
 	}
+	defer rows.Close()
 
-	return true, nil
+	trimmed := strings.TrimSpace(name)
+	for rows.Next() {
+		var (
+			id       int64
+			existing string
+		)
+		if err := rows.Scan(&id, &existing); err != nil {
+			return false, err
+		}
+		if id == exceptID {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(existing), trimmed) {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+
+	return false, nil
 }
 
 func (a *App) updateProjectName(ctx context.Context, id int64, name string) error {
@@ -523,6 +539,7 @@ func (a *App) updateMeeting(ctx context.Context, id int64, title string, happene
 	if err != nil {
 		return fmt.Errorf("update meeting: %w", err)
 	}
+
 	updated, err := res.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("update meeting: %w", err)
@@ -530,6 +547,7 @@ func (a *App) updateMeeting(ctx context.Context, id int64, title string, happene
 	if updated == 0 {
 		return sql.ErrNoRows
 	}
+
 	if _, err := tx.ExecContext(ctx, `DELETE FROM "references" WHERE meeting_id = ?`, id); err != nil {
 		return fmt.Errorf("update meeting: %w", err)
 	}
@@ -593,10 +611,12 @@ func (a *App) insertMeeting(ctx context.Context, title string, happened time.Tim
 	if err != nil {
 		return fmt.Errorf("insert meeting: %w", err)
 	}
+
 	meetingID, err := res.LastInsertId()
 	if err != nil {
 		return fmt.Errorf("insert meeting: %w", err)
 	}
+
 	if err := insertReferences(ctx, tx, meetingID, projectIDs); err != nil {
 		return fmt.Errorf("insert meeting: %w", err)
 	}
