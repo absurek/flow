@@ -419,6 +419,44 @@ func (a *App) insertTask(ctx context.Context, projectID int64, text string) erro
 	return nil
 }
 
+type citation struct {
+	ID         int64
+	Title      string
+	HappenedAt time.Time
+}
+
+func (a *App) listCitations(ctx context.Context, projectID int64) ([]citation, error) {
+	rows, err := a.db.QueryContext(ctx, `
+		SELECT m.id, m.title, m.happened_at
+		FROM "references" r
+		JOIN meetings m ON m.id = r.meeting_id
+		WHERE r.project_id = ?
+		ORDER BY m.happened_at DESC, m.created_at DESC, m.id DESC`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var citations []citation
+	for rows.Next() {
+		var (
+			item     citation
+			happened int64
+		)
+		if err := rows.Scan(&item.ID, &item.Title, &happened); err != nil {
+			return nil, err
+		}
+
+		item.HappenedAt = time.Unix(0, happened).UTC()
+		citations = append(citations, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return citations, nil
+}
+
 func (a *App) referenceProjectIDs(ctx context.Context, meetingID int64) ([]int64, error) {
 	rows, err := a.db.QueryContext(ctx, `
 		SELECT project_id
