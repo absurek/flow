@@ -17,6 +17,7 @@
 {{end}}
 
 {{define "foot"}}</main>
+<script src="/htmx.js"></script>
 </body>
 </html>
 {{end}}
@@ -60,5 +61,52 @@
 
 {{define "projects"}}{{template "head" .}}
 <h1 class="mb-6 text-2xl font-semibold tracking-tight">Projects</h1>
+<form method="post" action="/projects" class="mb-8 space-y-4 rounded-lg border border-zinc-800 bg-zinc-900 p-4">
+{{range .Errors}}<p class="text-red-300">{{.}}</p>{{end}}
+<div class="space-y-1">
+<label class="block text-sm text-zinc-400" for="name">Name</label>
+<input class="mt-1 w-full rounded border border-zinc-700 bg-zinc-950 px-3 py-2" id="name" name="name" type="text" value="{{.Name}}">
+</div>
+<button class="rounded bg-zinc-100 px-4 py-2 text-sm font-medium text-zinc-900" type="submit">Create Project</button>
+</form>
+{{if .Projects}}
+<ul class="space-y-4">
+{{range .Projects}}<li class="rounded-lg border border-zinc-800 bg-zinc-900 p-4">
+<a class="text-lg font-medium" href="/projects/{{.ID}}">{{.Name}}</a>
+<p class="mt-1 text-sm text-zinc-400">{{.Done}} done</p>
+<p class="text-sm text-zinc-400">{{.Open}} open</p>
+<p class="mt-3"><a href="/projects/{{.ID}}/delete">Delete</a></p>
+</li>
+{{end}}
+</ul>
+{{else}}
 <p class="text-zinc-400">No Projects.</p>
+{{end}}
+{{template "foot" .}}{{end}}
+
+{{define "project-name"}}<form id="project-name" method="post" action="/projects/{{.ID}}/name" hx-post="/projects/{{.ID}}/name" hx-trigger="blur from:find input" hx-target="#project-name" hx-swap="outerHTML">
+{{range .Errors}}<p class="text-red-300">{{.}}</p>{{end}}
+<label class="block text-sm text-zinc-400" for="project-name-field">Name</label>
+<input class="mt-1 w-full rounded border border-zinc-700 bg-zinc-950 px-3 py-2" id="project-name-field" name="name" type="text" value="{{.Name}}">
+</form>{{end}}
+
+{{define "project-notes"}}<form id="project-notes" class="mt-8" method="post" action="/projects/{{.ID}}/notes" hx-post="/projects/{{.ID}}/notes" hx-trigger="blur from:find textarea" hx-target="#project-notes" hx-swap="outerHTML">
+<label class="block text-sm text-zinc-400" for="notes">Notes</label>
+<textarea class="mt-1 w-full rounded border border-zinc-700 bg-zinc-950 px-3 py-2" id="notes" name="notes">{{.Notes}}</textarea>
+</form>{{end}}
+
+{{define "project"}}{{template "head" .}}
+{{template "project-name" .}}
+<hr class="mt-8 border-zinc-800">
+{{template "project-notes" .}}
+<p class="mt-8"><a href="/projects/{{.ID}}/delete">Delete</a></p>
+{{template "foot" .}}{{end}}
+
+{{define "project-delete"}}{{template "head" .}}
+<h1 class="mb-6 text-2xl font-semibold tracking-tight">Delete {{.Name}}?</h1>
+<p>This removes {{.Name}} and its notes.</p>
+<form class="mt-8" method="post" action="/projects/{{.ID}}/delete">
+<button class="rounded bg-zinc-100 px-4 py-2 text-sm font-medium text-zinc-900" type="submit">Delete Project</button>
+</form>
+<p class="mt-4"><a href="/projects/{{.ID}}">Cancel</a></p>
 {{template "foot" .}}{{end}}

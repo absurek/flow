@@ -17,6 +17,9 @@ import (
 //go:embed static/app.css
 var stylesheet []byte
 
+//go:embed static/htmx.min.js
+var htmxJS []byte
+
 //go:embed templates/*.html
 var templateFiles embed.FS
 
@@ -63,8 +66,26 @@ type feedPage struct {
 	Meetings []meetingView
 }
 
+type projectView struct {
+	ID   int64
+	Name string
+	Done int
+	Open int
+}
+
 type projectsPage struct {
-	Title string
+	Title    string
+	Name     string
+	Errors   []string
+	Projects []projectView
+}
+
+type projectPage struct {
+	Title  string
+	ID     int64
+	Name   string
+	Notes  string
+	Errors []string
 }
 
 type meetingPage struct {
@@ -122,7 +143,14 @@ func Listen(cfg Config) (*App, error) {
 	mux.HandleFunc("POST /meetings", app.postMeeting)
 	mux.HandleFunc("GET /meetings/{id}", app.meetingPage)
 	mux.HandleFunc("GET /projects", app.projects)
+	mux.HandleFunc("POST /projects", app.postProject)
+	mux.HandleFunc("GET /projects/{id}", app.projectPage)
+	mux.HandleFunc("POST /projects/{id}/name", app.postProjectName)
+	mux.HandleFunc("POST /projects/{id}/notes", app.postProjectNotes)
+	mux.HandleFunc("GET /projects/{id}/delete", app.projectDeletePage)
+	mux.HandleFunc("POST /projects/{id}/delete", app.postProjectDelete)
 	mux.HandleFunc("GET /styles.css", serveStyles)
+	mux.HandleFunc("GET /htmx.js", serveHTMX)
 
 	server := &http.Server{
 		Handler:           mux,
@@ -141,6 +169,15 @@ func Listen(cfg Config) (*App, error) {
 func serveStyles(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/css; charset=utf-8")
 	_, _ = w.Write(stylesheet)
+}
+
+func serveHTMX(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	_, _ = w.Write(htmxJS)
+}
+
+func htmxRequest(r *http.Request) bool {
+	return r.Header.Get("HX-Request") == "true"
 }
 
 func (a *App) feed(w http.ResponseWriter, r *http.Request) {
@@ -221,7 +258,212 @@ func (a *App) notFound(w http.ResponseWriter, message string) {
 }
 
 func (a *App) projects(w http.ResponseWriter, r *http.Request) {
-	a.render(w, http.StatusOK, "projects", projectsPage{Title: "Projects"})
+	a.renderProjects(w, r, http.StatusOK, "", nil)
+}
+
+func (a *App) renderProjects(w http.ResponseWriter, r *http.Request, status int, name string, errs []string) {
+	projects, err := a.listProjects(r.Context())
+	if err != nil {
+		http.Error(w, "could not load Projects", http.StatusInternalServerError)
+		return
+	}
+
+	views := make([]projectView, 0, len(projects))
+	for _, item := range projects {
+		views = append(views, projectView{
+			ID:   item.ID,
+			Name: item.Name,
+		})
+	}
+
+	a.render(w, status, "projects", projectsPage{
+		Title:    "Projects",
+		Name:     name,
+		Errors:   errs,
+		Projects: views,
+	})
+}
+
+func (a *App) postProject(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "could not read the form", http.StatusBadRequest)
+		return
+	}
+
+	typed := r.PostForm.Get("name")
+	name := strings.TrimSpace(typed)
+	if name == "" {
+		a.renderProjects(w, r, http.StatusBadRequest, typed, []string{"Name is required."})
+		return
+	}
+
+	taken, err := a.projectNameTaken(r.Context(), name, 0)
+	if err != nil {
+		http.Error(w, "could not save the Project", http.StatusInternalServerError)
+		return
+	}
+	if taken {
+		a.renderProjects(w, r, http.StatusBadRequest, typed, []string{"A Project with that name already exists."})
+		return
+	}
+
+	id, err := a.insertProject(r.Context(), name)
+	if err != nil {
+		http.Error(w, "could not save the Project", http.StatusInternalServerError)
+		return
+	}
+
+	http.Redirect(w, r, fmt.Sprintf("/projects/%d", id), http.StatusSeeOther)
+}
+
+func (a *App) projectPage(w http.ResponseWriter, r *http.Request) {
+	item, ok := a.loadProject(w, r)
+	if !ok {
+		return
+	}
+
+	a.renderProject(w, http.StatusOK, item, nil)
+}
+
+func (a *App) postProjectName(w http.ResponseWriter, r *http.Request) {
+	item, ok := a.loadProject(w, r)
+	if !ok {
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "could not read the form", http.StatusBadRequest)
+		return
+	}
+
+	name := strings.TrimSpace(r.PostForm.Get("name"))
+	if name == "" {
+		a.finishProjectName(w, r, item, []string{"Name is required."})
+		return
+	}
+
+	taken, err := a.projectNameTaken(r.Context(), name, item.ID)
+	if err != nil {
+		http.Error(w, "could not rename the Project", http.StatusInternalServerError)
+		return
+	}
+	if taken {
+		a.finishProjectName(w, r, item, []string{"A Project with that name already exists."})
+		return
+	}
+
+	if err := a.updateProjectName(r.Context(), item.ID, name); err != nil {
+		http.Error(w, "could not rename the Project", http.StatusInternalServerError)
+		return
+	}
+
+	item.Name = name
+	a.finishProjectName(w, r, item, nil)
+}
+
+func (a *App) finishProjectName(w http.ResponseWriter, r *http.Request, item project, errs []string) {
+	if htmxRequest(r) {
+		a.render(w, http.StatusOK, "project-name", projectPage{
+			Title:  item.Name,
+			ID:     item.ID,
+			Name:   item.Name,
+			Notes:  item.Notes,
+			Errors: errs,
+		})
+		return
+	}
+	if len(errs) > 0 {
+		a.renderProject(w, http.StatusBadRequest, item, errs)
+		return
+	}
+
+	http.Redirect(w, r, fmt.Sprintf("/projects/%d", item.ID), http.StatusSeeOther)
+}
+
+func (a *App) postProjectNotes(w http.ResponseWriter, r *http.Request) {
+	item, ok := a.loadProject(w, r)
+	if !ok {
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "could not read the form", http.StatusBadRequest)
+		return
+	}
+
+	notes := r.PostForm.Get("notes")
+	if err := a.updateProjectNotes(r.Context(), item.ID, notes); err != nil {
+		http.Error(w, "could not save the notes", http.StatusInternalServerError)
+		return
+	}
+
+	item.Notes = notes
+	if htmxRequest(r) {
+		a.render(w, http.StatusOK, "project-notes", projectPage{
+			Title: item.Name,
+			ID:    item.ID,
+			Name:  item.Name,
+			Notes: item.Notes,
+		})
+		return
+	}
+
+	http.Redirect(w, r, fmt.Sprintf("/projects/%d", item.ID), http.StatusSeeOther)
+}
+
+func (a *App) projectDeletePage(w http.ResponseWriter, r *http.Request) {
+	item, ok := a.loadProject(w, r)
+	if !ok {
+		return
+	}
+
+	a.render(w, http.StatusOK, "project-delete", projectPage{
+		Title: "Delete " + item.Name,
+		ID:    item.ID,
+		Name:  item.Name,
+	})
+}
+
+func (a *App) postProjectDelete(w http.ResponseWriter, r *http.Request) {
+	item, ok := a.loadProject(w, r)
+	if !ok {
+		return
+	}
+
+	if err := a.deleteProject(r.Context(), item.ID); err != nil {
+		http.Error(w, "could not delete the Project", http.StatusInternalServerError)
+		return
+	}
+
+	http.Redirect(w, r, "/projects", http.StatusSeeOther)
+}
+
+func (a *App) loadProject(w http.ResponseWriter, r *http.Request) (project, bool) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		a.notFound(w, "Project not found.")
+		return project{}, false
+	}
+
+	item, err := a.projectByID(r.Context(), id)
+	if errors.Is(err, sql.ErrNoRows) {
+		a.notFound(w, "Project not found.")
+		return project{}, false
+	}
+	if err != nil {
+		http.Error(w, "could not load the Project", http.StatusInternalServerError)
+		return project{}, false
+	}
+
+	return item, true
+}
+
+func (a *App) renderProject(w http.ResponseWriter, status int, item project, errs []string) {
+	a.render(w, status, "project", projectPage{
+		Title:  item.Name,
+		ID:     item.ID,
+		Name:   item.Name,
+		Notes:  item.Notes,
+		Errors: errs,
+	})
 }
 
 func (a *App) renderFeed(w http.ResponseWriter, r *http.Request, status int, fields composer, errs []string) {

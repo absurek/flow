@@ -3,6 +3,7 @@ package flow
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
 	"path/filepath"
@@ -20,6 +21,15 @@ CREATE TABLE IF NOT EXISTS meetings (
     body TEXT NOT NULL,
     created_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS projects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL COLLATE NOCASE,
+    notes TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS projects_name_unique ON projects(name);
 `
 
 func openDB(path string) (*sql.DB, error) {
@@ -126,6 +136,124 @@ func (a *App) meetingByID(ctx context.Context, id int64) (meeting, error) {
 	item.CreatedAt = time.Unix(0, created).UTC()
 
 	return item, nil
+}
+
+type project struct {
+	ID        int64
+	Name      string
+	Notes     string
+	CreatedAt time.Time
+}
+
+func (a *App) listProjects(ctx context.Context) ([]project, error) {
+	rows, err := a.db.QueryContext(ctx, `
+		SELECT id, name, notes, created_at
+		FROM projects
+		ORDER BY created_at DESC, id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var projects []project
+	for rows.Next() {
+		var (
+			item    project
+			created int64
+		)
+		if err := rows.Scan(&item.ID, &item.Name, &item.Notes, &created); err != nil {
+			return nil, err
+		}
+
+		item.CreatedAt = time.Unix(0, created).UTC()
+		projects = append(projects, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return projects, nil
+}
+
+func (a *App) projectByID(ctx context.Context, id int64) (project, error) {
+	var (
+		item    project
+		created int64
+	)
+	err := a.db.QueryRowContext(ctx, `
+		SELECT id, name, notes, created_at
+		FROM projects
+		WHERE id = ?`, id).Scan(&item.ID, &item.Name, &item.Notes, &created)
+	if err != nil {
+		return project{}, err
+	}
+
+	item.CreatedAt = time.Unix(0, created).UTC()
+
+	return item, nil
+}
+
+func (a *App) projectNameTaken(ctx context.Context, name string, exceptID int64) (bool, error) {
+	var id int64
+	err := a.db.QueryRowContext(ctx, `
+		SELECT id FROM projects
+		WHERE name = ? AND id <> ?`, name, exceptID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+
+	return true, nil
+}
+
+func (a *App) updateProjectName(ctx context.Context, id int64, name string) error {
+	_, err := a.db.ExecContext(ctx, `
+		UPDATE projects SET name = ? WHERE id = ?`, name, id)
+	if err != nil {
+		return fmt.Errorf("update project name: %w", err)
+	}
+
+	return nil
+}
+
+func (a *App) deleteProject(ctx context.Context, id int64) error {
+	_, err := a.db.ExecContext(ctx, `DELETE FROM projects WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("delete project: %w", err)
+	}
+
+	return nil
+}
+
+func (a *App) updateProjectNotes(ctx context.Context, id int64, notes string) error {
+	_, err := a.db.ExecContext(ctx, `
+		UPDATE projects SET notes = ? WHERE id = ?`, notes, id)
+	if err != nil {
+		return fmt.Errorf("update project notes: %w", err)
+	}
+
+	return nil
+}
+
+func (a *App) insertProject(ctx context.Context, name string) (int64, error) {
+	res, err := a.db.ExecContext(ctx, `
+		INSERT INTO projects (name, notes, created_at)
+		VALUES (?, '', ?)`,
+		name,
+		time.Now().UnixNano(),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("insert project: %w", err)
+	}
+
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("insert project: %w", err)
+	}
+
+	return id, nil
 }
 
 func (a *App) insertMeeting(ctx context.Context, title string, happened time.Time, body string) error {
