@@ -77,6 +77,52 @@
 
 {{define "meeting"}}{{template "head" .}}
 {{template "card" .Meeting}}
+<p class="mt-8"><a href="/meetings/{{.Meeting.ID}}/edit">Edit</a></p>
+<p class="mt-4"><a href="/meetings/{{.Meeting.ID}}/delete">Delete</a></p>
+{{template "foot" .}}{{end}}
+
+{{define "meeting-edit"}}{{template "head" .}}
+<div class="space-y-4 rounded-lg border border-zinc-800 bg-zinc-900 p-4">
+{{range .Errors}}<p class="text-red-300">{{.}}</p>{{end}}
+<form id="meeting-edit" method="post" action="/meetings/{{.ID}}" class="space-y-4">
+<button type="submit" hidden>Save</button>
+<div class="space-y-1">
+<label class="block text-sm text-zinc-400" for="title">Title</label>
+<input class="mt-1 w-full rounded border border-zinc-700 bg-zinc-950 px-3 py-2" id="title" name="title" type="text" value="{{.Composer.Title}}">
+</div>
+<div class="space-y-1">
+<label class="block text-sm text-zinc-400" for="happened-at">Happened at</label>
+<input class="mt-1 w-full rounded border border-zinc-700 bg-zinc-950 px-3 py-2" id="happened-at" name="happened_at" type="datetime-local" value="{{.Composer.HappenedAt}}">
+</div>
+<div class="space-y-1">
+<label class="block text-sm text-zinc-400" for="body">Body</label>
+<textarea class="mt-1 w-full rounded border border-zinc-700 bg-zinc-950 px-3 py-2" id="body" name="body">{{.Composer.Body}}</textarea>
+</div>
+{{range .Composer.Projects}}<input type="hidden" name="project" value="{{.ID}}">{{end}}
+<div class="space-y-1">
+<label class="block text-sm text-zinc-400" for="new-project">New Project</label>
+<input class="mt-1 w-full rounded border border-zinc-700 bg-zinc-950 px-3 py-2" id="new-project" name="name" type="text" value="{{.Composer.Name}}" aria-label="New Project">
+</div>
+</form>
+{{range .Composer.Projects}}<p class="mt-3"><a class="text-lg font-medium" href="/projects/{{.ID}}">{{.Name}}</a>
+<button class="text-sm text-zinc-400" type="submit" form="meeting-edit" formaction="/meetings/{{$.ID}}/projects" name="remove" value="{{.ID}}">Remove</button></p>
+{{template "project-tasks" .}}{{end}}
+<div class="mt-3 space-y-1">
+{{range .Composer.Picker}}<button class="font-medium text-zinc-100" type="submit" form="meeting-edit" formaction="/meetings/{{$.ID}}/projects" name="add" value="{{.ID}}">{{.Name}}</button>{{end}}
+<button class="rounded bg-zinc-100 px-4 py-2 text-sm font-medium text-zinc-900" type="submit" form="meeting-edit" formaction="/meetings/{{.ID}}/projects" name="create" value="1">Create Project</button>
+</div>
+<button class="rounded bg-zinc-100 px-4 py-2 text-sm font-medium text-zinc-900" type="submit" form="meeting-edit">Save</button>
+<p class="mt-4"><a href="/meetings/{{.ID}}">Cancel</a></p>
+</div>
+{{template "foot" .}}{{end}}
+
+{{define "meeting-delete"}}{{template "head" .}}
+<h1 class="mb-6 text-2xl font-semibold tracking-tight">Delete {{.Meeting.Title}}?</h1>
+<p>This removes {{.Meeting.Title}}.</p>
+<form class="mt-8" method="post" action="/meetings/{{.Meeting.ID}}/delete">
+<button class="rounded bg-zinc-100 px-4 py-2 text-sm font-medium text-zinc-900" type="submit">Delete Meeting</button>
+</form>
+<p class="mt-4"><a href="/meetings/{{.Meeting.ID}}">Cancel</a></p>
 {{template "foot" .}}{{end}}
 
 {{define "projects"}}{{template "head" .}}

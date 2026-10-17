@@ -484,6 +484,97 @@ func (a *App) referenceProjectIDs(ctx context.Context, meetingID int64) ([]int64
 	return ids, nil
 }
 
+func (a *App) deleteMeeting(ctx context.Context, id int64) error {
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("delete meeting: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM "references" WHERE meeting_id = ?`, id); err != nil {
+		return fmt.Errorf("delete meeting: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM meetings WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("delete meeting: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("delete meeting: %w", err)
+	}
+
+	return nil
+}
+
+func (a *App) updateMeeting(ctx context.Context, id int64, title string, happened time.Time, body string, projectIDs []int64) error {
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("update meeting: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx, `
+		UPDATE meetings
+		SET title = ?, happened_at = ?, body = ?
+		WHERE id = ?`,
+		title,
+		happened.UTC().UnixNano(),
+		body,
+		id,
+	)
+	if err != nil {
+		return fmt.Errorf("update meeting: %w", err)
+	}
+	updated, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("update meeting: %w", err)
+	}
+	if updated == 0 {
+		return sql.ErrNoRows
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM "references" WHERE meeting_id = ?`, id); err != nil {
+		return fmt.Errorf("update meeting: %w", err)
+	}
+	if err := insertReferences(ctx, tx, id, projectIDs); err != nil {
+		return fmt.Errorf("update meeting: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("update meeting: %w", err)
+	}
+
+	return nil
+}
+
+func insertReferences(ctx context.Context, tx *sql.Tx, meetingID int64, projectIDs []int64) error {
+	seen := make(map[int64]struct{}, len(projectIDs))
+	position := 0
+	for _, projectID := range projectIDs {
+		if projectID <= 0 {
+			continue
+		}
+		if _, ok := seen[projectID]; ok {
+			continue
+		}
+
+		var exists int64
+		err := tx.QueryRowContext(ctx, `SELECT id FROM projects WHERE id = ?`, projectID).Scan(&exists)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+
+		seen[projectID] = struct{}{}
+		position++
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO "references" (meeting_id, project_id, position)
+			VALUES (?, ?, ?)`, meetingID, projectID, position); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func (a *App) insertMeeting(ctx context.Context, title string, happened time.Time, body string, projectIDs []int64) error {
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -506,33 +597,8 @@ func (a *App) insertMeeting(ctx context.Context, title string, happened time.Tim
 	if err != nil {
 		return fmt.Errorf("insert meeting: %w", err)
 	}
-
-	seen := make(map[int64]struct{}, len(projectIDs))
-	position := 0
-	for _, projectID := range projectIDs {
-		if projectID <= 0 {
-			continue
-		}
-		if _, ok := seen[projectID]; ok {
-			continue
-		}
-
-		var exists int64
-		err := tx.QueryRowContext(ctx, `SELECT id FROM projects WHERE id = ?`, projectID).Scan(&exists)
-		if errors.Is(err, sql.ErrNoRows) {
-			continue
-		}
-		if err != nil {
-			return fmt.Errorf("insert meeting: %w", err)
-		}
-
-		seen[projectID] = struct{}{}
-		position++
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO "references" (meeting_id, project_id, position)
-			VALUES (?, ?, ?)`, meetingID, projectID, position); err != nil {
-			return fmt.Errorf("insert meeting: %w", err)
-		}
+	if err := insertReferences(ctx, tx, meetingID, projectIDs); err != nil {
+		return fmt.Errorf("insert meeting: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("insert meeting: %w", err)
