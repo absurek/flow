@@ -80,12 +80,20 @@ type projectsPage struct {
 	Projects []projectView
 }
 
+type taskView struct {
+	ID   int64
+	Text string
+	Done bool
+}
+
 type projectPage struct {
-	Title  string
-	ID     int64
-	Name   string
-	Notes  string
-	Errors []string
+	Title     string
+	ID        int64
+	Name      string
+	Notes     string
+	Errors    []string
+	Tasks     []taskView
+	TaskError string
 }
 
 type meetingPage struct {
@@ -147,6 +155,9 @@ func Listen(cfg Config) (*App, error) {
 	mux.HandleFunc("GET /projects/{id}", app.projectPage)
 	mux.HandleFunc("POST /projects/{id}/name", app.postProjectName)
 	mux.HandleFunc("POST /projects/{id}/notes", app.postProjectNotes)
+	mux.HandleFunc("POST /projects/{id}/tasks", app.postProjectTask)
+	mux.HandleFunc("POST /tasks/{id}", app.postTask)
+	mux.HandleFunc("POST /tasks/{id}/delete", app.postTaskDelete)
 	mux.HandleFunc("GET /projects/{id}/delete", app.projectDeletePage)
 	mux.HandleFunc("POST /projects/{id}/delete", app.postProjectDelete)
 	mux.HandleFunc("GET /styles.css", serveStyles)
@@ -273,6 +284,8 @@ func (a *App) renderProjects(w http.ResponseWriter, r *http.Request, status int,
 		views = append(views, projectView{
 			ID:   item.ID,
 			Name: item.Name,
+			Done: item.Done,
+			Open: item.Open,
 		})
 	}
 
@@ -322,7 +335,7 @@ func (a *App) projectPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.renderProject(w, http.StatusOK, item, nil)
+	a.renderProject(w, r, http.StatusOK, item, nil, "")
 }
 
 func (a *App) postProjectName(w http.ResponseWriter, r *http.Request) {
@@ -372,7 +385,7 @@ func (a *App) finishProjectName(w http.ResponseWriter, r *http.Request, item pro
 		return
 	}
 	if len(errs) > 0 {
-		a.renderProject(w, http.StatusBadRequest, item, errs)
+		a.renderProject(w, r, http.StatusBadRequest, item, errs, "")
 		return
 	}
 
@@ -456,13 +469,163 @@ func (a *App) loadProject(w http.ResponseWriter, r *http.Request) (project, bool
 	return item, true
 }
 
-func (a *App) renderProject(w http.ResponseWriter, status int, item project, errs []string) {
-	a.render(w, status, "project", projectPage{
-		Title:  item.Name,
-		ID:     item.ID,
-		Name:   item.Name,
-		Notes:  item.Notes,
-		Errors: errs,
+func (a *App) postTaskDelete(w http.ResponseWriter, r *http.Request) {
+	item, ok := a.loadTask(w, r)
+	if !ok {
+		return
+	}
+
+	if err := a.deleteTask(r.Context(), item.ID); err != nil {
+		http.Error(w, "could not delete the Task", http.StatusInternalServerError)
+		return
+	}
+
+	a.finishTasks(w, r, item.ProjectID, "")
+}
+
+func (a *App) postTask(w http.ResponseWriter, r *http.Request) {
+	item, ok := a.loadTask(w, r)
+	if !ok {
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "could not read the form", http.StatusBadRequest)
+		return
+	}
+
+	if _, exists := r.PostForm["text"]; exists {
+		text := singleLine(r.PostForm.Get("text"))
+		if text == "" {
+			a.finishTasks(w, r, item.ProjectID, "Task text is required.")
+			return
+		}
+		if err := a.updateTaskText(r.Context(), item.ID, text); err != nil {
+			http.Error(w, "could not save the Task", http.StatusInternalServerError)
+			return
+		}
+	}
+	if _, exists := r.PostForm["done"]; exists {
+		if err := a.updateTaskDone(r.Context(), item.ID, taskDoneValue(r.PostForm["done"])); err != nil {
+			http.Error(w, "could not save the Task", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	a.finishTasks(w, r, item.ProjectID, "")
+}
+
+func (a *App) loadTask(w http.ResponseWriter, r *http.Request) (task, bool) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		a.notFound(w, "Task not found.")
+		return task{}, false
+	}
+
+	item, err := a.taskByID(r.Context(), id)
+	if errors.Is(err, sql.ErrNoRows) {
+		a.notFound(w, "Task not found.")
+		return task{}, false
+	}
+	if err != nil {
+		http.Error(w, "could not load the Task", http.StatusInternalServerError)
+		return task{}, false
+	}
+
+	return item, true
+}
+
+func taskDoneValue(values []string) bool {
+	for _, value := range values {
+		if value == "1" || value == "on" || value == "true" {
+			return true
+		}
+	}
+
+	return false
+}
+
+func singleLine(text string) string {
+	text = strings.ReplaceAll(text, "\r\n", " ")
+	text = strings.ReplaceAll(text, "\n", " ")
+	text = strings.ReplaceAll(text, "\r", " ")
+
+	return strings.TrimSpace(text)
+}
+
+func (a *App) postProjectTask(w http.ResponseWriter, r *http.Request) {
+	item, ok := a.loadProject(w, r)
+	if !ok {
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "could not read the form", http.StatusBadRequest)
+		return
+	}
+
+	text := singleLine(r.PostForm.Get("text"))
+	if text == "" {
+		a.finishTasks(w, r, item.ID, "Task text is required.")
+		return
+	}
+	if err := a.insertTask(r.Context(), item.ID, text); err != nil {
+		http.Error(w, "could not save the Task", http.StatusInternalServerError)
+		return
+	}
+
+	a.finishTasks(w, r, item.ID, "")
+}
+
+func (a *App) finishTasks(w http.ResponseWriter, r *http.Request, projectID int64, taskErr string) {
+	item, err := a.projectByID(r.Context(), projectID)
+	if errors.Is(err, sql.ErrNoRows) {
+		a.notFound(w, "Project not found.")
+		return
+	}
+	if err != nil {
+		http.Error(w, "could not load the Project", http.StatusInternalServerError)
+		return
+	}
+
+	if htmxRequest(r) {
+		a.renderProjectTemplate(w, r, http.StatusOK, "project-tasks", item, nil, taskErr)
+		return
+	}
+	if taskErr != "" {
+		a.renderProjectTemplate(w, r, http.StatusBadRequest, "project", item, nil, taskErr)
+		return
+	}
+
+	http.Redirect(w, r, fmt.Sprintf("/projects/%d", item.ID), http.StatusSeeOther)
+}
+
+func (a *App) renderProject(w http.ResponseWriter, r *http.Request, status int, item project, errs []string, taskErr string) {
+	a.renderProjectTemplate(w, r, status, "project", item, errs, taskErr)
+}
+
+func (a *App) renderProjectTemplate(w http.ResponseWriter, r *http.Request, status int, name string, item project, errs []string, taskErr string) {
+	tasks, err := a.listTasks(r.Context(), item.ID)
+	if err != nil {
+		http.Error(w, "could not load Tasks", http.StatusInternalServerError)
+		return
+	}
+
+	views := make([]taskView, 0, len(tasks))
+	for _, item := range tasks {
+		views = append(views, taskView{
+			ID:   item.ID,
+			Text: item.Text,
+			Done: item.Done,
+		})
+	}
+
+	a.render(w, status, name, projectPage{
+		Title:     item.Name,
+		ID:        item.ID,
+		Name:      item.Name,
+		Notes:     item.Notes,
+		Errors:    errs,
+		Tasks:     views,
+		TaskError: taskErr,
 	})
 }
 

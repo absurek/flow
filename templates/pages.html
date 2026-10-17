@@ -95,8 +95,30 @@
 <textarea class="mt-1 w-full rounded border border-zinc-700 bg-zinc-950 px-3 py-2" id="notes" name="notes">{{.Notes}}</textarea>
 </form>{{end}}
 
+{{define "project-tasks"}}<div id="project-tasks" class="mt-8 space-y-3">
+{{if .TaskError}}<p class="text-red-300">{{.TaskError}}</p>{{end}}
+{{range .Tasks}}<div class="flex items-center gap-3" data-task="{{.ID}}">
+<form method="post" action="/tasks/{{.ID}}" hx-post="/tasks/{{.ID}}" hx-trigger="change" hx-target="#project-tasks" hx-swap="outerHTML">
+<input class="h-4 w-4 accent-zinc-100" type="checkbox" name="done" value="1"{{if .Done}} checked{{end}} aria-label="Done">
+<input type="hidden" name="done" value="0">
+</form>
+<form class="min-w-0 flex-1" method="post" action="/tasks/{{.ID}}" hx-post="/tasks/{{.ID}}" hx-trigger="blur from:find input" hx-target="#project-tasks" hx-swap="outerHTML">
+<input class="w-full rounded border border-zinc-700 bg-zinc-950 px-3 py-2{{if .Done}} text-zinc-500 line-through{{end}}" type="text" name="text" value="{{.Text}}" aria-label="Task">
+</form>
+<form method="post" action="/tasks/{{.ID}}/delete" hx-post="/tasks/{{.ID}}/delete" hx-target="#project-tasks" hx-swap="outerHTML">
+<button class="text-sm text-zinc-400" type="submit">Delete</button>
+</form>
+</div>
+{{end}}
+<form id="add-task" class="flex items-center gap-3" method="post" action="/projects/{{.ID}}/tasks" hx-post="/projects/{{.ID}}/tasks" hx-target="#project-tasks" hx-swap="outerHTML">
+<input class="min-w-0 flex-1 rounded border border-zinc-700 bg-zinc-950 px-3 py-2" type="text" name="text" aria-label="New Task">
+<button class="rounded bg-zinc-100 px-4 py-2 text-sm font-medium text-zinc-900" type="submit">Add Task</button>
+</form>
+</div>{{end}}
+
 {{define "project"}}{{template "head" .}}
 {{template "project-name" .}}
+{{template "project-tasks" .}}
 <hr class="mt-8 border-zinc-800">
 {{template "project-notes" .}}
 <p class="mt-8"><a href="/projects/{{.ID}}/delete">Delete</a></p>
@@ -104,7 +126,7 @@
 
 {{define "project-delete"}}{{template "head" .}}
 <h1 class="mb-6 text-2xl font-semibold tracking-tight">Delete {{.Name}}?</h1>
-<p>This removes {{.Name}} and its notes.</p>
+<p>This removes {{.Name}}, its tasks, and its notes.</p>
 <form class="mt-8" method="post" action="/projects/{{.ID}}/delete">
 <button class="rounded bg-zinc-100 px-4 py-2 text-sm font-medium text-zinc-900" type="submit">Delete Project</button>
 </form>
