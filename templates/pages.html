@@ -26,12 +26,19 @@
 <h2 class="text-lg font-medium"><a href="/meetings/{{.ID}}">{{.Title}}</a></h2>
 <p class="mt-1 text-sm text-zinc-400">{{.HappenedAt}}</p>
 <p class="mt-3 whitespace-pre-wrap">{{.Body}}</p>
+{{range .Projects}}<section class="mt-3">
+<a class="text-lg font-medium" href="/projects/{{.ID}}">{{.Name}}</a>
+{{template "project-tasks" .}}
+</section>{{end}}
 </article>{{end}}
 
 {{define "feed"}}{{template "head" .}}
 <h1 class="mb-6 text-2xl font-semibold tracking-tight">Meetings</h1>
-<form method="post" action="/meetings" class="space-y-4 rounded-lg border border-zinc-800 bg-zinc-900 p-4">
+<div id="composer-panel" class="space-y-4 rounded-lg border border-zinc-800 bg-zinc-900 p-4">
 {{range .Errors}}<p class="text-red-300">{{.}}</p>{{end}}
+<form id="composer" method="post" action="/meetings" class="space-y-4">
+{{/* First submit button, so Enter posts the Meeting instead of a picker action. */}}
+<button type="submit" hidden>Post Meeting</button>
 <div class="space-y-1">
 <label class="block text-sm text-zinc-400" for="title">Title</label>
 <input class="mt-1 w-full rounded border border-zinc-700 bg-zinc-950 px-3 py-2" id="title" name="title" type="text" value="{{.Composer.Title}}">
@@ -44,8 +51,21 @@
 <label class="block text-sm text-zinc-400" for="body">Body</label>
 <textarea class="mt-1 w-full rounded border border-zinc-700 bg-zinc-950 px-3 py-2" id="body" name="body">{{.Composer.Body}}</textarea>
 </div>
-<button class="rounded bg-zinc-100 px-4 py-2 text-sm font-medium text-zinc-900" type="submit">Post Meeting</button>
+{{range .Composer.Projects}}<input type="hidden" name="project" value="{{.ID}}">{{end}}
+<div class="space-y-1">
+<label class="block text-sm text-zinc-400" for="new-project">New Project</label>
+<input class="mt-1 w-full rounded border border-zinc-700 bg-zinc-950 px-3 py-2" id="new-project" name="name" type="text" value="{{.Composer.Name}}" aria-label="New Project">
+</div>
 </form>
+{{range .Composer.Projects}}<p class="mt-3"><a class="text-lg font-medium" href="/projects/{{.ID}}">{{.Name}}</a>
+<button class="text-sm text-zinc-400" type="submit" form="composer" formaction="/composer/projects" name="remove" value="{{.ID}}">Remove</button></p>
+{{template "project-tasks" .}}{{end}}
+<div class="mt-3 space-y-1">
+{{range .Composer.Picker}}<button class="font-medium text-zinc-100" type="submit" form="composer" formaction="/composer/projects" name="add" value="{{.ID}}">{{.Name}}</button>{{end}}
+<button class="rounded bg-zinc-100 px-4 py-2 text-sm font-medium text-zinc-900" type="submit" form="composer" formaction="/composer/projects" name="create" value="1">Create Project</button>
+</div>
+<button class="rounded bg-zinc-100 px-4 py-2 text-sm font-medium text-zinc-900" type="submit" form="composer">Post Meeting</button>
+</div>
 <div class="mt-8 space-y-4">
 {{range .Meetings}}{{template "card" .}}{{end}}
 </div>
@@ -95,22 +115,22 @@
 <textarea class="mt-1 w-full rounded border border-zinc-700 bg-zinc-950 px-3 py-2" id="notes" name="notes">{{.Notes}}</textarea>
 </form>{{end}}
 
-{{define "project-tasks"}}<div id="project-tasks" class="mt-8 space-y-3">
+{{define "project-tasks"}}{{$tasksID := .TasksID}}<div id="{{$tasksID}}" class="mt-8 space-y-3">
 {{if .TaskError}}<p class="text-red-300">{{.TaskError}}</p>{{end}}
 {{range .Tasks}}<div class="flex items-center gap-3" data-task="{{.ID}}">
-<form method="post" action="/tasks/{{.ID}}" hx-post="/tasks/{{.ID}}" hx-trigger="change" hx-target="#project-tasks" hx-swap="outerHTML">
+<form method="post" action="/tasks/{{.ID}}" hx-post="/tasks/{{.ID}}" hx-trigger="change" hx-target="#{{$tasksID}}" hx-swap="outerHTML">
 <input class="h-4 w-4 accent-zinc-100" type="checkbox" name="done" value="1"{{if .Done}} checked{{end}} aria-label="Done">
 <input type="hidden" name="done" value="0">
 </form>
-<form class="min-w-0 flex-1" method="post" action="/tasks/{{.ID}}" hx-post="/tasks/{{.ID}}" hx-trigger="blur from:find input" hx-target="#project-tasks" hx-swap="outerHTML">
+<form class="min-w-0 flex-1" method="post" action="/tasks/{{.ID}}" hx-post="/tasks/{{.ID}}" hx-trigger="blur from:find input" hx-target="#{{$tasksID}}" hx-swap="outerHTML">
 <input class="w-full rounded border border-zinc-700 bg-zinc-950 px-3 py-2{{if .Done}} text-zinc-500 line-through{{end}}" type="text" name="text" value="{{.Text}}" aria-label="Task">
 </form>
-<form method="post" action="/tasks/{{.ID}}/delete" hx-post="/tasks/{{.ID}}/delete" hx-target="#project-tasks" hx-swap="outerHTML">
+<form method="post" action="/tasks/{{.ID}}/delete" hx-post="/tasks/{{.ID}}/delete" hx-target="#{{$tasksID}}" hx-swap="outerHTML">
 <button class="text-sm text-zinc-400" type="submit">Delete</button>
 </form>
 </div>
 {{end}}
-<form id="add-task" class="flex items-center gap-3" method="post" action="/projects/{{.ID}}/tasks" hx-post="/projects/{{.ID}}/tasks" hx-target="#project-tasks" hx-swap="outerHTML">
+<form class="flex items-center gap-3" method="post" action="/projects/{{.ID}}/tasks" hx-post="/projects/{{.ID}}/tasks" hx-target="#{{$tasksID}}" hx-swap="outerHTML">
 <input class="min-w-0 flex-1 rounded border border-zinc-700 bg-zinc-950 px-3 py-2" type="text" name="text" aria-label="New Task">
 <button class="rounded bg-zinc-100 px-4 py-2 text-sm font-medium text-zinc-900" type="submit">Add Task</button>
 </form>

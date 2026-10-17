@@ -38,6 +38,13 @@ CREATE TABLE IF NOT EXISTS tasks (
     done INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS "references" (
+    meeting_id INTEGER NOT NULL,
+    project_id INTEGER NOT NULL,
+    position INTEGER NOT NULL,
+    PRIMARY KEY (meeting_id, project_id)
+);
 `
 
 func openDB(path string) (*sql.DB, error) {
@@ -207,6 +214,30 @@ func (a *App) projectByID(ctx context.Context, id int64) (project, error) {
 	return item, nil
 }
 
+func (a *App) keptProjectIDs(ctx context.Context, ids []int64) ([]int64, error) {
+	kept := make([]int64, 0, len(ids))
+	seen := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+
+		if _, err := a.projectByID(ctx, id); errors.Is(err, sql.ErrNoRows) {
+			continue
+		} else if err != nil {
+			return nil, err
+		}
+
+		seen[id] = struct{}{}
+		kept = append(kept, id)
+	}
+
+	return kept, nil
+}
+
 func (a *App) projectNameTaken(ctx context.Context, name string, exceptID int64) (bool, error) {
 	var id int64
 	err := a.db.QueryRowContext(ctx, `
@@ -240,6 +271,9 @@ func (a *App) deleteProject(ctx context.Context, id int64) error {
 	defer func() { _ = tx.Rollback() }()
 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM tasks WHERE project_id = ?`, id); err != nil {
+		return fmt.Errorf("delete project: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM "references" WHERE project_id = ?`, id); err != nil {
 		return fmt.Errorf("delete project: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM projects WHERE id = ?`, id); err != nil {
@@ -385,8 +419,41 @@ func (a *App) insertTask(ctx context.Context, projectID int64, text string) erro
 	return nil
 }
 
-func (a *App) insertMeeting(ctx context.Context, title string, happened time.Time, body string) error {
-	_, err := a.db.ExecContext(ctx, `
+func (a *App) referenceProjectIDs(ctx context.Context, meetingID int64) ([]int64, error) {
+	rows, err := a.db.QueryContext(ctx, `
+		SELECT project_id
+		FROM "references"
+		WHERE meeting_id = ?
+		ORDER BY position ASC, project_id ASC`, meetingID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return ids, nil
+}
+
+func (a *App) insertMeeting(ctx context.Context, title string, happened time.Time, body string, projectIDs []int64) error {
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("insert meeting: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx, `
 		INSERT INTO meetings (title, happened_at, body, created_at)
 		VALUES (?, ?, ?, ?)`,
 		title,
@@ -395,6 +462,41 @@ func (a *App) insertMeeting(ctx context.Context, title string, happened time.Tim
 		time.Now().UnixNano(),
 	)
 	if err != nil {
+		return fmt.Errorf("insert meeting: %w", err)
+	}
+	meetingID, err := res.LastInsertId()
+	if err != nil {
+		return fmt.Errorf("insert meeting: %w", err)
+	}
+
+	seen := make(map[int64]struct{}, len(projectIDs))
+	position := 0
+	for _, projectID := range projectIDs {
+		if projectID <= 0 {
+			continue
+		}
+		if _, ok := seen[projectID]; ok {
+			continue
+		}
+
+		var exists int64
+		err := tx.QueryRowContext(ctx, `SELECT id FROM projects WHERE id = ?`, projectID).Scan(&exists)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("insert meeting: %w", err)
+		}
+
+		seen[projectID] = struct{}{}
+		position++
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO "references" (meeting_id, project_id, position)
+			VALUES (?, ?, ?)`, meetingID, projectID, position); err != nil {
+			return fmt.Errorf("insert meeting: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("insert meeting: %w", err)
 	}
 
