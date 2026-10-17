@@ -123,6 +123,13 @@ type meetingPage struct {
 	Meeting meetingView
 }
 
+type meetingEditPage struct {
+	Title    string
+	ID       int64
+	Errors   []string
+	Composer composer
+}
+
 type messagePage struct {
 	Title   string
 	Message string
@@ -173,6 +180,11 @@ func Listen(cfg Config) (*App, error) {
 	mux.HandleFunc("POST /meetings", app.postMeeting)
 	mux.HandleFunc("POST /composer/projects", app.postComposerProjects)
 	mux.HandleFunc("GET /meetings/{id}", app.meetingPage)
+	mux.HandleFunc("GET /meetings/{id}/edit", app.meetingEdit)
+	mux.HandleFunc("POST /meetings/{id}/projects", app.postMeetingProjects)
+	mux.HandleFunc("POST /meetings/{id}", app.saveMeeting)
+	mux.HandleFunc("GET /meetings/{id}/delete", app.meetingDeletePage)
+	mux.HandleFunc("POST /meetings/{id}/delete", app.postMeetingDelete)
 	mux.HandleFunc("GET /projects", app.projects)
 	mux.HandleFunc("POST /projects", app.postProject)
 	mux.HandleFunc("GET /projects/{id}", app.projectPage)
@@ -278,18 +290,74 @@ func (a *App) postComposerProjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ids, err := a.keptProjectIDs(r.Context(), formProjectIDs(r.PostForm["project"]))
+	selection, err := a.selectProjects(r)
 	if err != nil {
 		http.Error(w, "could not load Projects", http.StatusInternalServerError)
 		return
+	}
+	projects, err := a.linkedProjects(r.Context(), selection.IDs, composerTasksID)
+	if err != nil {
+		http.Error(w, "could not load Projects", http.StatusInternalServerError)
+		return
+	}
+
+	a.renderFeed(w, r, selection.Status, composer{
+		Title:      r.PostForm.Get("title"),
+		HappenedAt: r.PostForm.Get("happened_at"),
+		Body:       r.PostForm.Get("body"),
+		Name:       selection.Name,
+		Projects:   projects,
+	}, selection.Errs)
+}
+
+func (a *App) postMeetingProjects(w http.ResponseWriter, r *http.Request) {
+	item, ok := a.loadMeeting(w, r)
+	if !ok {
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "could not read the form", http.StatusBadRequest)
+		return
+	}
+
+	selection, err := a.selectProjects(r)
+	if err != nil {
+		http.Error(w, "could not load Projects", http.StatusInternalServerError)
+		return
+	}
+	projects, err := a.editProjects(r.Context(), item.ID, selection.IDs)
+	if err != nil {
+		http.Error(w, "could not load Projects", http.StatusInternalServerError)
+		return
+	}
+
+	a.renderMeetingEdit(w, r, selection.Status, item.ID, composer{
+		Title:      r.PostForm.Get("title"),
+		HappenedAt: r.PostForm.Get("happened_at"),
+		Body:       r.PostForm.Get("body"),
+		Name:       selection.Name,
+		Projects:   projects,
+	}, selection.Errs)
+}
+
+type projectSelection struct {
+	IDs    []int64
+	Name   string
+	Errs   []string
+	Status int
+}
+
+func (a *App) selectProjects(r *http.Request) (projectSelection, error) {
+	ids, err := a.keptProjectIDs(r.Context(), formProjectIDs(r.PostForm["project"]))
+	if err != nil {
+		return projectSelection{}, err
 	}
 	if remove := formProjectIDs([]string{r.PostForm.Get("remove")}); len(remove) == 1 {
 		ids = withoutID(ids, remove[0])
 	}
 	addIDs, err := a.keptProjectIDs(r.Context(), formProjectIDs([]string{r.PostForm.Get("add")}))
 	if err != nil {
-		http.Error(w, "could not load Projects", http.StatusInternalServerError)
-		return
+		return projectSelection{}, err
 	}
 	for _, id := range addIDs {
 		if !containsID(ids, id) {
@@ -308,8 +376,7 @@ func (a *App) postComposerProjects(w http.ResponseWriter, r *http.Request) {
 		} else {
 			taken, err := a.projectNameTaken(r.Context(), trimmed, 0)
 			if err != nil {
-				http.Error(w, "could not save the Project", http.StatusInternalServerError)
-				return
+				return projectSelection{}, err
 			}
 			if taken {
 				errs = append(errs, "A Project with that name already exists.")
@@ -317,8 +384,7 @@ func (a *App) postComposerProjects(w http.ResponseWriter, r *http.Request) {
 			} else {
 				id, err := a.insertProject(r.Context(), trimmed)
 				if err != nil {
-					http.Error(w, "could not save the Project", http.StatusInternalServerError)
-					return
+					return projectSelection{}, err
 				}
 
 				ids = append(ids, id)
@@ -327,19 +393,12 @@ func (a *App) postComposerProjects(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	projects, err := a.linkedProjects(r.Context(), ids, composerTasksID)
-	if err != nil {
-		http.Error(w, "could not load Projects", http.StatusInternalServerError)
-		return
-	}
-
-	a.renderFeed(w, r, status, composer{
-		Title:      r.PostForm.Get("title"),
-		HappenedAt: r.PostForm.Get("happened_at"),
-		Body:       r.PostForm.Get("body"),
-		Name:       typedName,
-		Projects:   projects,
-	}, errs)
+	return projectSelection{
+		IDs:    ids,
+		Name:   typedName,
+		Errs:   errs,
+		Status: status,
+	}, nil
 }
 
 func composerTasksID(id int64) string {
@@ -382,19 +441,8 @@ func containsID(ids []int64, id int64) bool {
 }
 
 func (a *App) meetingPage(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil || id <= 0 {
-		a.notFound(w, "Meeting not found.")
-		return
-	}
-
-	item, err := a.meetingByID(r.Context(), id)
-	if errors.Is(err, sql.ErrNoRows) {
-		a.notFound(w, "Meeting not found.")
-		return
-	}
-	if err != nil {
-		http.Error(w, "could not load the Meeting", http.StatusInternalServerError)
+	item, ok := a.loadMeeting(w, r)
+	if !ok {
 		return
 	}
 
@@ -408,6 +456,156 @@ func (a *App) meetingPage(w http.ResponseWriter, r *http.Request) {
 		Title:   view.Title,
 		Meeting: view,
 	})
+}
+
+func (a *App) meetingEdit(w http.ResponseWriter, r *http.Request) {
+	item, ok := a.loadMeeting(w, r)
+	if !ok {
+		return
+	}
+
+	ids, err := a.referenceProjectIDs(r.Context(), item.ID)
+	if err != nil {
+		http.Error(w, "could not load the Meeting", http.StatusInternalServerError)
+		return
+	}
+	projects, err := a.editProjects(r.Context(), item.ID, ids)
+	if err != nil {
+		http.Error(w, "could not load the Meeting", http.StatusInternalServerError)
+		return
+	}
+
+	a.renderMeetingEdit(w, r, http.StatusOK, item.ID, composer{
+		Title:      item.Title,
+		HappenedAt: item.HappenedAt.In(a.loc).Format(happenedAtInput),
+		Body:       item.Body,
+		Projects:   projects,
+	}, nil)
+}
+
+func (a *App) saveMeeting(w http.ResponseWriter, r *http.Request) {
+	item, ok := a.loadMeeting(w, r)
+	if !ok {
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "could not read the form", http.StatusBadRequest)
+		return
+	}
+
+	title := r.PostForm.Get("title")
+	happenedRaw := r.PostForm.Get("happened_at")
+	body := r.PostForm.Get("body")
+	ids, err := a.keptProjectIDs(r.Context(), formProjectIDs(r.PostForm["project"]))
+	if err != nil {
+		http.Error(w, "could not load Projects", http.StatusInternalServerError)
+		return
+	}
+
+	var errs []string
+	if strings.TrimSpace(title) == "" {
+		errs = append(errs, "Title is required.")
+	}
+
+	happenedAt := strings.TrimSpace(happenedRaw)
+	happened, err := time.ParseInLocation(happenedAtInput, happenedAt, a.loc)
+	if happenedAt == "" {
+		errs = append(errs, "Happened-at is required.")
+	} else if err != nil {
+		errs = append(errs, "Happened-at is invalid.")
+	}
+
+	if len(errs) > 0 {
+		projects, err := a.editProjects(r.Context(), item.ID, ids)
+		if err != nil {
+			http.Error(w, "could not load Projects", http.StatusInternalServerError)
+			return
+		}
+
+		a.renderMeetingEdit(w, r, http.StatusBadRequest, item.ID, composer{
+			Title:      title,
+			HappenedAt: happenedRaw,
+			Body:       body,
+			Name:       r.PostForm.Get("name"),
+			Projects:   projects,
+		}, errs)
+		return
+	}
+
+	if err := a.updateMeeting(r.Context(), item.ID, strings.TrimSpace(title), happened, body, ids); err != nil {
+		http.Error(w, "could not save the Meeting", http.StatusInternalServerError)
+		return
+	}
+
+	http.Redirect(w, r, fmt.Sprintf("/meetings/%d", item.ID), http.StatusSeeOther)
+}
+
+func (a *App) meetingDeletePage(w http.ResponseWriter, r *http.Request) {
+	item, ok := a.loadMeeting(w, r)
+	if !ok {
+		return
+	}
+
+	a.render(w, http.StatusOK, "meeting-delete", meetingPage{
+		Title:   "Delete " + item.Title,
+		Meeting: meetingView{ID: item.ID, Title: item.Title},
+	})
+}
+
+func (a *App) postMeetingDelete(w http.ResponseWriter, r *http.Request) {
+	item, ok := a.loadMeeting(w, r)
+	if !ok {
+		return
+	}
+
+	if err := a.deleteMeeting(r.Context(), item.ID); err != nil {
+		http.Error(w, "could not delete the Meeting", http.StatusInternalServerError)
+		return
+	}
+
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func (a *App) renderMeetingEdit(w http.ResponseWriter, r *http.Request, status int, id int64, fields composer, errs []string) {
+	projects, err := a.listProjects(r.Context())
+	if err != nil {
+		http.Error(w, "could not load Projects", http.StatusInternalServerError)
+		return
+	}
+	fields.Picker = pickerProjects(projects, fields.Projects)
+
+	a.render(w, status, "meeting-edit", meetingEditPage{
+		Title:    "Edit Meeting",
+		ID:       id,
+		Errors:   errs,
+		Composer: fields,
+	})
+}
+
+func (a *App) editProjects(ctx context.Context, meetingID int64, ids []int64) ([]linkedProject, error) {
+	return a.linkedProjects(ctx, ids, func(projectID int64) string {
+		return fmt.Sprintf("meeting-%d-tasks-%d", meetingID, projectID)
+	})
+}
+
+func (a *App) loadMeeting(w http.ResponseWriter, r *http.Request) (meeting, bool) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		a.notFound(w, "Meeting not found.")
+		return meeting{}, false
+	}
+
+	item, err := a.meetingByID(r.Context(), id)
+	if errors.Is(err, sql.ErrNoRows) {
+		a.notFound(w, "Meeting not found.")
+		return meeting{}, false
+	}
+	if err != nil {
+		http.Error(w, "could not load the Meeting", http.StatusInternalServerError)
+		return meeting{}, false
+	}
+
+	return item, true
 }
 
 func (a *App) notFound(w http.ResponseWriter, message string) {
