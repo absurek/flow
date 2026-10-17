@@ -30,6 +30,14 @@ CREATE TABLE IF NOT EXISTS projects (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS projects_name_unique ON projects(name);
+
+CREATE TABLE IF NOT EXISTS tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    done INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL
+);
 `
 
 func openDB(path string) (*sql.DB, error) {
@@ -143,13 +151,19 @@ type project struct {
 	Name      string
 	Notes     string
 	CreatedAt time.Time
+	Done      int
+	Open      int
 }
 
 func (a *App) listProjects(ctx context.Context) ([]project, error) {
 	rows, err := a.db.QueryContext(ctx, `
-		SELECT id, name, notes, created_at
-		FROM projects
-		ORDER BY created_at DESC, id DESC`)
+		SELECT p.id, p.name, p.notes, p.created_at,
+			COALESCE(SUM(CASE WHEN t.done != 0 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN t.id IS NOT NULL AND t.done = 0 THEN 1 ELSE 0 END), 0)
+		FROM projects p
+		LEFT JOIN tasks t ON t.project_id = p.id
+		GROUP BY p.id
+		ORDER BY p.created_at DESC, p.id DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -161,7 +175,7 @@ func (a *App) listProjects(ctx context.Context) ([]project, error) {
 			item    project
 			created int64
 		)
-		if err := rows.Scan(&item.ID, &item.Name, &item.Notes, &created); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &item.Notes, &created, &item.Done, &item.Open); err != nil {
 			return nil, err
 		}
 
@@ -219,8 +233,19 @@ func (a *App) updateProjectName(ctx context.Context, id int64, name string) erro
 }
 
 func (a *App) deleteProject(ctx context.Context, id int64) error {
-	_, err := a.db.ExecContext(ctx, `DELETE FROM projects WHERE id = ?`, id)
+	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
+		return fmt.Errorf("delete project: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM tasks WHERE project_id = ?`, id); err != nil {
+		return fmt.Errorf("delete project: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM projects WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("delete project: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("delete project: %w", err)
 	}
 
@@ -254,6 +279,110 @@ func (a *App) insertProject(ctx context.Context, name string) (int64, error) {
 	}
 
 	return id, nil
+}
+
+type task struct {
+	ID        int64
+	ProjectID int64
+	Text      string
+	Done      bool
+}
+
+func (a *App) listTasks(ctx context.Context, projectID int64) ([]task, error) {
+	rows, err := a.db.QueryContext(ctx, `
+		SELECT id, text, done
+		FROM tasks
+		WHERE project_id = ?
+		ORDER BY done DESC, created_at ASC, id ASC`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var tasks []task
+	for rows.Next() {
+		var (
+			item task
+			done int
+		)
+		if err := rows.Scan(&item.ID, &item.Text, &done); err != nil {
+			return nil, err
+		}
+
+		item.Done = done != 0
+		item.ProjectID = projectID
+		tasks = append(tasks, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return tasks, nil
+}
+
+func (a *App) taskByID(ctx context.Context, id int64) (task, error) {
+	var (
+		item task
+		done int
+	)
+	err := a.db.QueryRowContext(ctx, `
+		SELECT id, project_id, text, done
+		FROM tasks
+		WHERE id = ?`, id).Scan(&item.ID, &item.ProjectID, &item.Text, &done)
+	if err != nil {
+		return task{}, err
+	}
+
+	item.Done = done != 0
+
+	return item, nil
+}
+
+func (a *App) deleteTask(ctx context.Context, id int64) error {
+	_, err := a.db.ExecContext(ctx, `DELETE FROM tasks WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("delete task: %w", err)
+	}
+
+	return nil
+}
+
+func (a *App) updateTaskText(ctx context.Context, id int64, text string) error {
+	_, err := a.db.ExecContext(ctx, `UPDATE tasks SET text = ? WHERE id = ?`, text, id)
+	if err != nil {
+		return fmt.Errorf("update task: %w", err)
+	}
+
+	return nil
+}
+
+func (a *App) updateTaskDone(ctx context.Context, id int64, done bool) error {
+	flag := 0
+	if done {
+		flag = 1
+	}
+
+	_, err := a.db.ExecContext(ctx, `UPDATE tasks SET done = ? WHERE id = ?`, flag, id)
+	if err != nil {
+		return fmt.Errorf("update task: %w", err)
+	}
+
+	return nil
+}
+
+func (a *App) insertTask(ctx context.Context, projectID int64, text string) error {
+	_, err := a.db.ExecContext(ctx, `
+		INSERT INTO tasks (project_id, text, done, created_at)
+		VALUES (?, ?, 0, ?)`,
+		projectID,
+		text,
+		time.Now().UnixNano(),
+	)
+	if err != nil {
+		return fmt.Errorf("insert task: %w", err)
+	}
+
+	return nil
 }
 
 func (a *App) insertMeeting(ctx context.Context, title string, happened time.Time, body string) error {

@@ -215,8 +215,8 @@ func TestProjectPageShowsNameDividerAndNotes(t *testing.T) {
 	if countElements(doc, "hr") != 1 {
 		t.Fatalf("divider count = %d, want one divider", countElements(doc, "hr"))
 	}
-	if elementByName(doc, "input", "task") != nil || elementByName(doc, "input", "text") != nil {
-		t.Fatal("project page should not ask for a task yet")
+	if len(taskRows(doc)) != 0 {
+		t.Fatal("a Project with no Tasks should not list one")
 	}
 	if hasAttribute(doc, "data-citation") || strings.Contains(textContent(doc), "Planning") || strings.Contains(textContent(doc), "citation") {
 		t.Fatalf("project page text = %q, want no citation rule", textContent(doc))
